@@ -38,6 +38,9 @@ export default function Counter({ type }: Props) {
   const [firmId, setFirmId] = useState('')
   const [docNumber, setDocNumber] = useState('')
   const [deliveredDay, setDeliveredDay] = useState(isoDay(Date.now()))
+  // How the delivery is paid for. 'owe' leaves a debt (the original behaviour); the others
+  // settle the whole delivery on the spot, in the same write. See createDelivery's `settle`.
+  const [payType, setPayType] = useState<'owe' | 'cash' | 'card'>('owe')
 
   // What's literally typed in each quantity box, while it's being typed. Without this
   // the box is bound straight to the number, so clearing it to type a new one reads as
@@ -173,6 +176,7 @@ export default function Counter({ type }: Props) {
           order_id: orderId || undefined,
           delivered_at: startOfDay(deliveredDay),
           doc_number: docNumber.trim() || undefined,
+          settle: payType === 'owe' ? undefined : payType,
           lines: lines.map((l) => ({
             product_id: l.product.id,
             product_name: l.product.name,
@@ -184,7 +188,11 @@ export default function Counter({ type }: Props) {
         }, actor)
 
         const firm = suppliers.find((f) => f.id === firmId)
-        toast(`Qabul qilindi — ${money(res.total)} · ${firm?.name ?? ''} qarziga qo'shildi`)
+        toast(
+          payType === 'owe'
+            ? `Qabul qilindi — ${money(res.total)} · ${firm?.name ?? ''} qarziga qo'shildi`
+            : `Qabul qilindi va to'landi — ${money(res.total)} · ${firm?.name ?? ''}`,
+        )
         clearCart()
         setNote('')
         setDocNumber('')
@@ -412,26 +420,53 @@ export default function Counter({ type }: Props) {
                 </div>
 
                 {!!firmId && (
-                  <div className="grid grid-cols-2 gap-2">
+                  <>
                     <div>
-                      <label className="label">Faktura №</label>
-                      <input
-                        className="field h-9"
-                        value={docNumber}
-                        onChange={(e) => setDocNumber(e.target.value)}
-                        placeholder="4471"
-                      />
+                      <label className="label">To'lov</label>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {([
+                          ['owe', 'Qarzga'],
+                          ['cash', 'Naqd'],
+                          ['card', 'Plastik'],
+                        ] as const).map(([key, label]) => (
+                          <button
+                            key={key}
+                            type="button"
+                            onClick={() => setPayType(key)}
+                            className={`btn h-9 text-xs ${payType === key ? 'btn-primary' : 'btn-ghost'}`}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-xs text-ink-400 mt-1">
+                        {payType === 'owe'
+                          ? "Summa firma qarziga qo'shiladi."
+                          : 'Darhol to\'lanadi — qarz qolmaydi.'}
+                      </p>
                     </div>
-                    <div>
-                      <label className="label">Kelgan sana</label>
-                      <input
-                        type="date"
-                        className="field h-9"
-                        value={deliveredDay}
-                        onChange={(e) => setDeliveredDay(e.target.value)}
-                      />
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="label">Faktura №</label>
+                        <input
+                          className="field h-9"
+                          value={docNumber}
+                          onChange={(e) => setDocNumber(e.target.value)}
+                          placeholder="4471"
+                        />
+                      </div>
+                      <div>
+                        <label className="label">Kelgan sana</label>
+                        <input
+                          type="date"
+                          className="field h-9"
+                          value={deliveredDay}
+                          onChange={(e) => setDeliveredDay(e.target.value)}
+                        />
+                      </div>
                     </div>
-                  </div>
+                  </>
                 )}
               </div>
             )}
@@ -476,7 +511,9 @@ export default function Counter({ type }: Props) {
                 : isSale
                   ? 'Sotuvni tasdiqlash'
                   : firmId
-                    ? 'Qabul qilish (qarzga)'
+                    ? payType === 'owe'
+                      ? 'Qabul qilish (qarzga)'
+                      : "Qabul qilish (to'landi)"
                     : 'Kirimni tasdiqlash'}
             </button>
           </div>

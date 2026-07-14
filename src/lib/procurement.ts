@@ -40,6 +40,13 @@ export interface NewDelivery {
   doc_date?: number
   lines: OrderLine[]
   note?: string
+  /**
+   * Set when the goods are paid for on the spot. The delivery, its stock, its debt, AND the
+   * settling payment then commit in ONE transaction — because "paid cash at receipt" is a single
+   * event, and recording the debt without the payment (even for a moment) would misreport what
+   * the shop owes. Left unset, the delivery is on credit, exactly as before.
+   */
+  settle?: Payment['method']
 }
 
 /**
@@ -65,9 +72,14 @@ export async function createDelivery(
   const now = Date.now()
   const total = linesTotal(input.lines)
 
-  await tx([STORES.products, STORES.transactions, STORES.deliveries], 'readwrite', async (t) => {
+  const stores = input.settle
+    ? [STORES.products, STORES.transactions, STORES.deliveries, STORES.payments]
+    : [STORES.products, STORES.transactions, STORES.deliveries]
+
+  await tx(stores, 'readwrite', async (t) => {
+    const { settle: _settle, ...header } = input
     await put(t, STORES.deliveries, {
-      ...input,
+      ...header,
       id,
       created_at: now,       // write time — the sync watermark. Never delivered_at.
       total_amount: total,   // snapshotted, so a later reprice cannot rewrite this debt
@@ -75,6 +87,24 @@ export async function createDelivery(
       user_role: actor.role,
       voided: false,
     } satisfies Delivery)
+
+    // Paid on the spot: settle the whole delivery in the SAME transaction, so the debt this
+    // delivery creates and the payment that clears it can never be observed apart.
+    if (input.settle) {
+      await put(t, STORES.payments, {
+        id: newId(),
+        supplier_id: input.supplier_id,
+        amount: total,
+        created_at: now,
+        paid_at: input.delivered_at,
+        method: input.settle,
+        doc_number: input.doc_number,
+        note: input.doc_number ? `Faktura №${input.doc_number} uchun to'lov` : undefined,
+        user_name: actor.name,
+        user_role: actor.role,
+        voided: false,
+      } satisfies Payment)
+    }
 
     for (const l of input.lines) {
       const p = await get<Product>(t, STORES.products, l.product_id)

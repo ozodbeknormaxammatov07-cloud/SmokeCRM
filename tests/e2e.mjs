@@ -317,6 +317,32 @@ try {
     `balance returns to zero — sum(deliveries) - sum(payments) = 0`)
   if (!isSettled) problems.push(`Firm not settled after full payment. Saw: ${settled.slice(0, 300)}`)
 
+  // ---------------------------------------------------------------- 15 PROBE
+  // Paying cash AT RECEIPT: the delivery and its settling payment in one action.
+  await nav('Kirim')
+  await page.waitForTimeout(400)
+  await page.getByPlaceholder(/Mahsulot nomi yoki shtrix-kod/).fill('Winston Blue')
+  await page.waitForTimeout(300)
+  await page.keyboard.press('Enter')
+  await page.waitForTimeout(300)
+  await page.selectOption('select', { label: 'Test Firma MChJ' })
+  await page.waitForTimeout(200)
+  await page.getByRole('button', { name: 'Naqd', exact: true }).click()   // pay cash on the spot
+  await page.getByRole('button', { name: /Qabul qilish \(to'landi\)/ }).click()
+  await page.waitForTimeout(800)
+
+  await nav('Firmalar')
+  await page.waitForTimeout(500)
+  // The firm was settled before this delivery, so a cash-paid receipt must leave it settled —
+  // no new debt. If the payment had NOT been written, it would now read a debt.
+  const stillSettled = await page.getByText('Test Firma MChJ').first().isVisible()
+  const firmsAfterCash = await page.locator('body').innerText()
+  const noNewDebt = /Qarz yo'q/.test(firmsAfterCash) || !/14\s*000/.test(firmsAfterCash.replace(/ /g, ' '))
+  await shot('15-cash-at-receipt')
+  log(stillSettled && noNewDebt ? '🔍' : '❌', 'PROBE: receiving goods paid in cash leaves no debt',
+    `delivery + settling payment committed together — the firm still owes nothing`)
+  if (!(stillSettled && noNewDebt)) problems.push(`Cash-at-receipt left a debt. Saw: ${firmsAfterCash.slice(0, 200)}`)
+
   // ---------------------------------------------------------------- 10 PROBE
   await page.setViewportSize({ width: 390, height: 844 })
   await page.waitForTimeout(600)

@@ -109,6 +109,35 @@ async function main() {
   eq('debt untouched by the refused void',
     supplierBalance((await fetchDeliveries()).filter((d) => d.supplier_id === 'F2'), []), 80_000)
 
+  console.log('\n=== paying cash at receipt settles the firm in one write ===')
+  const cashProd = await createProduct({
+    name: 'Marlboro', brand: 'Marlboro', cost_price: 22_000, selling_price: 28_000,
+    current_stock: 0, reorder_threshold: 5, active: true,
+  }, ACTOR)
+  await createDelivery({
+    supplier_id: 'F-CASH', delivered_at: Date.now(), doc_number: '5000',
+    settle: 'cash',
+    lines: [{ product_id: cashProd, product_name: 'Marlboro', brand: 'Marlboro', quantity: 10, unit_cost: 22_000 }],
+  }, ACTOR)
+
+  const cashDs = (await fetchDeliveries()).filter((d) => d.supplier_id === 'F-CASH')
+  const cashPs = (await fetchPayments()).filter((p) => p.supplier_id === 'F-CASH')
+  eq('stock still rose', (await byId(cashProd)).current_stock, 10)
+  eq('a settling payment was written alongside the delivery', cashPs.length, 1)
+  eq('its amount matches the delivery total', cashPs[0].amount, 220_000)
+  eq('the method is recorded', cashPs[0].method, 'cash')
+  eq('the firm owes nothing — paid on the spot', supplierBalance(cashDs, cashPs), 0)
+
+  console.log('\n=== a credit delivery still leaves a debt ===')
+  await createDelivery({
+    supplier_id: 'F-CREDIT', delivered_at: Date.now(),
+    lines: [{ product_id: cashProd, product_name: 'Marlboro', brand: 'Marlboro', quantity: 5, unit_cost: 22_000 }],
+  }, ACTOR)
+  const creditDs = (await fetchDeliveries()).filter((d) => d.supplier_id === 'F-CREDIT')
+  const creditPs = (await fetchPayments()).filter((p) => p.supplier_id === 'F-CREDIT')
+  eq('no payment written for a credit delivery', creditPs.length, 0)
+  eq('the firm is owed the full amount', supplierBalance(creditDs, creditPs), 110_000)
+
   console.log('\n=== an empty delivery is refused ===')
   threw = null
   try {
