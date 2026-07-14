@@ -49,7 +49,7 @@ const stockDelta = (t: Transaction): number => (t.type === 'SALE' ? -t.quantity 
  * Must be called inside a transaction that already covers both stores, so the recomputed
  * value cannot be read between the ledger write and the cache update.
  */
-async function recomputeStock(t: IDBTransaction, productId: string): Promise<number> {
+export async function recomputeStock(t: IDBTransaction, productId: string): Promise<number> {
   const rows = await getAllByRange<Transaction>(
     t, STORES.transactions, 'product_id', IDBKeyRange.only(productId),
   )
