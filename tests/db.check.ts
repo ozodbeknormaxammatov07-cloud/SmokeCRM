@@ -167,15 +167,14 @@ async function main() {
     current_stock: 20, reorder_threshold: 5, active: true,
   }, ACTOR)
   await commitCart('SALE', [line(await byId(payProd), 2)], ACTOR, '', 'card')
-  const cardSale = (await fetchAllTransactions()).find(
-    (t) => t.product_id === payProd && t.type === 'SALE')!
-  eq('payment method stamped on the sale', cardSale.payment_method, 'card')
-
-  await commitCart('SALE', [line(await byId(payProd), 1)], ACTOR)   // default
-  const defSale = (await fetchAllTransactions())
+  await commitCart('SALE', [line(await byId(payProd), 1)], ACTOR)   // default -> cash
+  // Order-independent: both sales can share a millisecond ts, so assert the set of methods
+  // rather than "the latest is cash".
+  const methods = (await fetchAllTransactions())
     .filter((t) => t.product_id === payProd && t.type === 'SALE')
-    .sort((a, b) => b.ts - a.ts)[0]
-  eq('default sale payment is cash', defSale.payment_method, 'cash')
+    .map((t) => t.payment_method)
+    .sort()
+  eq('the explicit method and the default (cash) are both recorded', methods, ['card', 'cash'])
 
   console.log('\n=== resetAllData wipes the business stores ===')
   ok('there is data to wipe', (await fetchAllTransactions()).length > 0 && (await products()).length > 0)

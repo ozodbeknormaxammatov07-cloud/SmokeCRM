@@ -354,6 +354,32 @@ try {
     `delivery + settling payment committed together — the firm still owes nothing`)
   if (!(stillSettled && noNewDebt)) problems.push(`Cash-at-receipt left a debt. Saw: ${firmsAfterCash.slice(0, 200)}`)
 
+  // --- kassa: a Naqd sale feeds the drawer, an expense drains it (still admin) -
+  await nav('Sotuv')
+  await page.getByPlaceholder(/Mahsulot nomi yoki shtrix-kod/).fill('Winston Blue')
+  await page.waitForTimeout(300); await page.keyboard.press('Enter'); await page.waitForTimeout(300)
+  // Naqd is the default payment; just confirm the sale.
+  await page.getByRole('button', { name: /Sotuvni tasdiqlash/ }).click()
+  await page.waitForTimeout(700)
+
+  await nav('Kassa')
+  await page.waitForTimeout(500)
+  const drawerText = (await page.locator('.card').first().innerText()).replace(/\s/g, '')
+  const drawerHasCash = /[1-9]/.test(drawerText.replace(/\D/g, ''))
+  await shot('16-kassa')
+  log(drawerHasCash ? '🔍' : '❌', 'PROBE: a Naqd sale feeds the drawer',
+    `Kassa "bo'lishi kerak" is non-zero after a cash sale`)
+  if (!drawerHasCash) problems.push(`Cash sale did not reach the drawer: ${drawerText.slice(0, 80)}`)
+
+  await page.getByRole('button', { name: '− Chiqim' }).click(); await page.waitForTimeout(300)
+  await page.locator('.fixed.z-50 input').first().fill('10000')
+  await page.locator('.fixed.z-50').getByPlaceholder(/choy-non/).fill('test xarajat')
+  await page.locator('.fixed.z-50').getByRole('button', { name: 'Saqlash' }).click()
+  await page.waitForTimeout(600)
+  const hasExpense = /Xarajat/.test(await page.locator('body').innerText())
+  log(hasExpense ? '🔍' : '❌', 'PROBE: recording a cash expense', 'expense appears in Kassa history')
+  if (!hasExpense) problems.push('Cash expense not recorded')
+
   // --- roles: an admin creates a cashier, who can only sell -------------------
   await nav('Xodimlar')
   await page.getByRole('button', { name: '+ Xodim' }).click()
@@ -374,7 +400,7 @@ try {
   await page.waitForTimeout(900)
 
   const cashierNav = await page.locator('aside nav').innerText().catch(() => '')
-  const hidesAdmin = !/Firmalar|Hisobot|Kirim|Boshqaruv|Xodimlar/.test(cashierNav)
+  const hidesAdmin = !/Firmalar|Hisobot|Kirim|Boshqaruv|Xodimlar|Kassa/.test(cashierNav)
   await shot('16-cashier-view')
   log(hidesAdmin ? '🔍' : '❌', 'PROBE: the cashier nav hides every admin area',
     `only Sotuv and Mahsulotlar are offered — saw "${cashierNav.replace(/\n+/g, ' ').trim()}"`)
