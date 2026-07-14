@@ -9,7 +9,6 @@ import {
 } from 'react'
 import { initDb, watchProducts, watchRecentTransactions, watchSuppliers } from './lib/db'
 import { watchDeliveries, watchPayments, watchPurchaseOrders } from './lib/procurement'
-import { startAutoSync } from './lib/sync'
 import type {
   Product, Transaction, Supplier, Role, Delivery, Payment, PurchaseOrder,
 } from './lib/types'
@@ -91,9 +90,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           watchDeliveries(setDeliveries),
           watchPayments(setPayments),
           watchPurchaseOrders(setOrders),
-          // Cloud backup is strictly additive: if it's unconfigured or the network is down,
-          // this is a no-op and the till carries on exactly as before.
-          startAutoSync(),
         ]
       })
       .catch((e: Error) => {
