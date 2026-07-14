@@ -67,11 +67,10 @@ commitCart(type, lines, actor, note = '', payment: SalePaymentMethod = 'cash')
 
 It stamps `payment_method` on each SALE row. For RESTOCK it is left unset.
 
-`voidTransaction` builds its reversal twin from explicit fields, not by copying the original, so
-it must be changed to carry `payment_method: original.payment_method` onto the twin. Without this
-the voided original (`+total`, cash) would have no cash twin to cancel it, and a voided cash sale
-would leave the drawer overstated. With it, original and twin both carry the cash method and the
-pair nets to zero — the same rule the rest of the ledger follows.
+Voids need no change to `voidTransaction`. The drawer counts sales the same way `analytics.totals`
+counts revenue — with the live filter `!voided && !reversal_of`, which drops both the voided
+original and its reversal twin. So a voided cash sale simply contributes zero to the drawer, as if
+it never happened, and the reversal twin does not need to carry a payment method.
 
 ### CashMovement — the manual cash in/out
 
@@ -103,10 +102,10 @@ physical count). Two dates for the same reason deliveries and payments have them
 
 ## Derived reads (pure, in a new `src/lib/kassa.ts`)
 
-- `cashFromSales(txs: Transaction[]): number` — sum of `total_amount` over ALL SALE rows with
-  `payment_method === 'cash'`, voided originals and their negative twins both included so they
-  cancel to zero (same summing treatment as `analytics.totals`). Never filter voided rows out
-  here — that would drop the original and leave the twin, or vice versa, and misreport the drawer.
+- `cashFromSales(txs: Transaction[]): number` — sum of `total_amount` over LIVE SALE rows with
+  `payment_method === 'cash'`, using the same `!voided && !reversal_of` filter `analytics.totals`
+  uses. A voided sale (original flagged, twin marked `reversal_of`) is dropped on both sides, so
+  it contributes zero — the drawer treats it as if it never happened.
 - `cashToFirms(payments: Payment[]): number` — sum of `amount` over payments with `method ===
   'cash'` (voided pairs cancel).
 - `cashMovementsTotal(rows: CashMovement[]): number` — signed sum (voided pairs cancel).
@@ -179,7 +178,7 @@ guarded by it, exactly like the other admin areas.
 **Unit — `tests/kassa.check.ts` (pure functions + fake-indexeddb):**
 - `drawerBalance` = cash sales − cash firm payments + signed movements.
 - A card or click sale does NOT move the drawer; a cash sale does.
-- A voided cash sale nets to zero (original + twin summed).
+- A voided cash sale contributes zero to the drawer (dropped by the live filter).
 - A voided cash payment to a firm restores the drawer.
 - `recordCashMovement` sign convention: deposit +, expense/withdrawal −.
 - `voidCashMovement` restores the drawer; the twin is opposite-signed.
@@ -195,8 +194,8 @@ clears `cash_movements`.
 ## Implementation order
 
 1. `SalePaymentMethod`, `CashMovement` types; `cash_movements` store (DB v4); `payment_method` on
-   `Transaction`; `commitCart` stamps it and `voidTransaction` copies it onto the twin. Unit + db
-   tests (including that a voided cash sale nets to zero).
+   `Transaction`; `commitCart` stamps it. Unit + db tests (including that a voided cash sale
+   contributes zero to the drawer via the live filter).
 2. `kassa.ts` pure reads and write ops, with unit tests.
 3. Sotuv payment selector.
 4. Kassa screen + capability + nav/route; dashboard tile.
