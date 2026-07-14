@@ -1,7 +1,10 @@
 import { useMemo, useRef, useState, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useStore } from '../store'
 import { commitCart, StockError } from '../lib/db'
-import { money, num, parseNum } from '../lib/format'
+import { createDelivery } from '../lib/procurement'
+import { outstandingLines } from '../lib/payables'
+import { money, num, parseNum, isoDay, startOfDay } from '../lib/format'
 import { stockLevel } from '../lib/analytics'
 import { Page, StockBadge, Empty } from './ui'
 import type { CartLine, Product, TxType } from '../lib/types'
@@ -14,10 +17,16 @@ interface Props {
  * The till. Sales and restocks are the same interaction — pick a product, set a
  * quantity, confirm — so they share one screen with different pricing defaults and
  * a different stock guard.
+ *
+ * A restock additionally accepts a FIRM. Choosing one turns the same basket into a delivery:
+ * stock rises and the firm's debt rises, in one atomic write. Leaving it blank keeps the plain
+ * restock this page has always been — no debt, nothing recorded against anybody.
  */
 export default function Counter({ type }: Props) {
-  const { products, brands, actor, toast } = useStore()
+  const { products, brands, actor, toast, suppliers, orders, deliveries } = useStore()
   const isSale = type === 'SALE'
+  const [params] = useSearchParams()
+  const orderId = params.get('buyurtma') ?? ''
 
   const [q, setQ] = useState('')
   const [brand, setBrand] = useState('')
@@ -25,6 +34,10 @@ export default function Counter({ type }: Props) {
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
+
+  const [firmId, setFirmId] = useState('')
+  const [docNumber, setDocNumber] = useState('')
+  const [deliveredDay, setDeliveredDay] = useState(isoDay(Date.now()))
 
   // What's literally typed in each quantity box, while it's being typed. Without this
   // the box is bound straight to the number, so clearing it to type a new one reads as
@@ -35,6 +48,29 @@ export default function Counter({ type }: Props) {
     // Barcode scanners type into whatever is focused, so keep the search box hot.
     searchRef.current?.focus()
   }, [])
+
+  // Arriving from an order ("Qabul qilish"): prefill the basket with what is STILL OUTSTANDING,
+  // never the full order — a second delivery against a partly-received order must not re-receive
+  // the goods that already came, or the shelf would gain stock that never arrived.
+  //
+  // Keyed on the order id alone: re-running this as `deliveries` updates would fight the user's
+  // own edits to the basket.
+  useEffect(() => {
+    if (!orderId) return
+    const order = orders.find((o) => o.id === orderId)
+    if (!order) return
+
+    setFirmId(order.supplier_id)
+    setLines(
+      outstandingLines(order, deliveries)
+        .map((l) => {
+          const p = products.find((x) => x.id === l.product_id)
+          return p ? { product: p, quantity: l.quantity, unit_price: l.unit_cost } : null
+        })
+        .filter((l): l is CartLine => l !== null),
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderId, orders.length, products.length])
 
   const results = useMemo(() => {
     const needle = q.trim().toLowerCase()
@@ -128,6 +164,35 @@ export default function Counter({ type }: Props) {
     if (!lines.length || busy) return
     setBusy(true)
     try {
+      // A firm turns this from a bare stock movement into a DELIVERY: stock rises AND the firm's
+      // debt rises, in one atomic write, so the two can never drift apart. With no firm chosen
+      // it stays exactly the plain restock it has always been.
+      if (!isSale && firmId) {
+        const res = await createDelivery({
+          supplier_id: firmId,
+          order_id: orderId || undefined,
+          delivered_at: startOfDay(deliveredDay),
+          doc_number: docNumber.trim() || undefined,
+          lines: lines.map((l) => ({
+            product_id: l.product.id,
+            product_name: l.product.name,
+            brand: l.product.brand,
+            quantity: l.quantity,
+            unit_cost: l.unit_price,
+          })),
+          note: note.trim() || undefined,
+        }, actor)
+
+        const firm = suppliers.find((f) => f.id === firmId)
+        toast(`Qabul qilindi — ${money(res.total)} · ${firm?.name ?? ''} qarziga qo'shildi`)
+        clearCart()
+        setNote('')
+        setDocNumber('')
+        setQ('')
+        searchRef.current?.focus()
+        return
+      }
+
       const res = await commitCart(type, lines, actor, note.trim())
       toast(
         isSale
@@ -168,7 +233,7 @@ export default function Counter({ type }: Props) {
       subtitle={
         isSale
           ? "Mahsulotni tanlang, sonini kiriting va tasdiqlang. Qoldiq avtomatik kamayadi."
-          : "Yangi kelgan tovarni kiriting. Qoldiq avtomatik oshadi."
+          : "Yangi kelgan tovarni kiriting. Firma tanlansangiz — qarz ham yoziladi."
       }
     >
       <div className="grid lg:grid-cols-[1fr_22rem] gap-5 items-start">
@@ -325,6 +390,52 @@ export default function Counter({ type }: Props) {
           )}
 
           <div className="mt-4 pt-4 border-t border-ink-200 space-y-2">
+            {!isSale && (
+              <div className="rounded-lg border border-ink-200 p-3 space-y-2">
+                <div>
+                  <label className="label">Firma</label>
+                  <select
+                    className="field"
+                    value={firmId}
+                    onChange={(e) => setFirmId(e.target.value)}
+                  >
+                    <option value="">Firmasiz (oddiy kirim)</option>
+                    {suppliers.map((f) => (
+                      <option key={f.id} value={f.id}>{f.name}</option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-ink-400 mt-1">
+                    {firmId
+                      ? "Summa shu firma qarziga qo'shiladi."
+                      : "Firma tanlanmasa faqat qoldiq oshadi — qarz yozilmaydi."}
+                  </p>
+                </div>
+
+                {!!firmId && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="label">Faktura №</label>
+                      <input
+                        className="field h-9"
+                        value={docNumber}
+                        onChange={(e) => setDocNumber(e.target.value)}
+                        placeholder="4471"
+                      />
+                    </div>
+                    <div>
+                      <label className="label">Kelgan sana</label>
+                      <input
+                        type="date"
+                        className="field h-9"
+                        value={deliveredDay}
+                        onChange={(e) => setDeliveredDay(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             <input
               className="field"
               placeholder="Izoh (ixtiyoriy)"
@@ -360,7 +471,13 @@ export default function Counter({ type }: Props) {
               disabled={!lines.length || busy || !!overStock.length}
               className={`w-full btn-lg ${isSale ? 'btn-primary' : 'btn bg-emerald-600 text-white hover:bg-emerald-700'}`}
             >
-              {busy ? 'Saqlanmoqda…' : isSale ? 'Sotuvni tasdiqlash' : 'Kirimni tasdiqlash'}
+              {busy
+                ? 'Saqlanmoqda…'
+                : isSale
+                  ? 'Sotuvni tasdiqlash'
+                  : firmId
+                    ? 'Qabul qilish (qarzga)'
+                    : 'Kirimni tasdiqlash'}
             </button>
           </div>
         </div>

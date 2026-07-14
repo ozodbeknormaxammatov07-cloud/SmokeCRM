@@ -1,7 +1,9 @@
 import { supabase, currentSession } from './supabase'
 import { snapshotForSync, mergeRemote } from './db'
 import { subscribe } from './idb'
-import type { Product, Transaction, Supplier } from './types'
+import type {
+  Product, Transaction, Supplier, PurchaseOrder, Delivery, Payment, OrderLine, Role,
+} from './types'
 
 /**
  * Two-way sync between this device's IndexedDB and the shop's Supabase row.
@@ -114,8 +116,67 @@ const rowToSupplier = (r: Record<string, unknown>): Supplier => ({
   name: String(r.name ?? ''),
   contact: (r.contact as string) ?? undefined,
   note: (r.note as string) ?? undefined,
+  inn: (r.inn as string) ?? undefined,
+  bank_account: (r.bank_account as string) ?? undefined,
+  bank_name: (r.bank_name as string) ?? undefined,
+  bank_mfo: (r.bank_mfo as string) ?? undefined,
+  address: (r.address as string) ?? undefined,
+  director: (r.director as string) ?? undefined,
+  payment_terms_days: nOrU(r.payment_terms_days),
   updated_at: nOrU(r.updated_at),
   deleted_at: nOrU(r.deleted_at),
+})
+
+const role = (v: unknown): Role => (v === 'cashier' ? 'cashier' : 'admin')
+
+const rowToOrder = (r: Record<string, unknown>): PurchaseOrder => ({
+  id: String(r.id),
+  supplier_id: String(r.supplier_id),
+  number: String(r.number ?? ''),
+  ordered_at: n(r.ordered_at),
+  expected_at: nOrU(r.expected_at),
+  lines: (r.lines as OrderLine[]) ?? [],
+  cancelled_at: nOrU(r.cancelled_at),
+  note: (r.note as string) ?? undefined,
+  user_name: String(r.user_name ?? ''),
+  user_role: role(r.user_role),
+  created_at: n(r.created_at),
+  updated_at: n(r.updated_at),
+  deleted_at: nOrU(r.deleted_at),
+})
+
+const rowToDelivery = (r: Record<string, unknown>): Delivery => ({
+  id: String(r.id),
+  supplier_id: String(r.supplier_id),
+  order_id: (r.order_id as string) ?? undefined,
+  created_at: n(r.created_at),
+  delivered_at: n(r.delivered_at),
+  doc_number: (r.doc_number as string) ?? undefined,
+  doc_date: nOrU(r.doc_date),
+  lines: (r.lines as OrderLine[]) ?? [],
+  total_amount: n(r.total_amount),
+  note: (r.note as string) ?? undefined,
+  user_name: String(r.user_name ?? ''),
+  user_role: role(r.user_role),
+  voided: Boolean(r.voided),
+  reversal_of: (r.reversal_of as string) ?? undefined,
+})
+
+const METHODS = ['cash', 'bank', 'card', 'other'] as const
+
+const rowToPayment = (r: Record<string, unknown>): Payment => ({
+  id: String(r.id),
+  supplier_id: String(r.supplier_id),
+  amount: n(r.amount),
+  created_at: n(r.created_at),
+  paid_at: n(r.paid_at),
+  method: METHODS.includes(r.method as never) ? (r.method as Payment['method']) : 'cash',
+  doc_number: (r.doc_number as string) ?? undefined,
+  note: (r.note as string) ?? undefined,
+  user_name: String(r.user_name ?? ''),
+  user_role: role(r.user_role),
+  voided: Boolean(r.voided),
+  reversal_of: (r.reversal_of as string) ?? undefined,
 })
 
 /* ------------------------------------------------------------------ */
@@ -138,6 +199,7 @@ async function pushChanges(uid: string): Promise<number> {
 
   const products = local.products.filter((p) => (p.updated_at ?? 0) >= wm)
   const suppliers = local.suppliers.filter((s) => (s.updated_at ?? 0) >= wm)
+  const orders = local.purchase_orders.filter((o) => (o.updated_at ?? 0) >= wm)
 
   // A void flips `voided` on an OLD row while writing a NEW reversal row. The old row sits
   // behind the watermark and would never be re-sent, leaving the other devices showing a sale
@@ -147,14 +209,37 @@ async function pushChanges(uid: string): Promise<number> {
   const revived = local.transactions.filter((t) => voidedIds.has(t.id) && t.ts < wm)
   const txs = [...fresh, ...revived]
 
+  // Deliveries and payments are filtered on created_at — the WRITE time — never on
+  // delivered_at / paid_at. A delivery typed in today for goods that arrived last week has a
+  // delivered_at far behind the watermark; filtering on it would mean the row never leaves this
+  // device, and the tills would disagree about the debt forever.
+  const freshD = local.deliveries.filter((d) => d.created_at >= wm)
+  const freshP = local.payments.filter((p) => p.created_at >= wm)
+
+  // Same void-drag rule as transactions, for the same reason.
+  const voidedD = new Set(freshD.filter((d) => d.reversal_of).map((d) => d.reversal_of!))
+  const voidedP = new Set(freshP.filter((p) => p.reversal_of).map((p) => p.reversal_of!))
+  const deliveries = [
+    ...freshD,
+    ...local.deliveries.filter((d) => voidedD.has(d.id) && d.created_at < wm),
+  ]
+  const payments = [
+    ...freshP,
+    ...local.payments.filter((p) => voidedP.has(p.id) && p.created_at < wm),
+  ]
+
   // `current_stock` is deliberately not sent: it is this device's cache of the ledger, and
   // every device derives its own from the rows it has.
   await upsertChunked('products', products.map(({ current_stock: _s, ...p }) => ({ ...p, user_id: uid })))
   await upsertChunked('transactions', txs.map((t) => ({ ...t, user_id: uid })))
   await upsertChunked('suppliers', suppliers.map((s) => ({ ...s, user_id: uid })))
+  await upsertChunked('purchase_orders', orders.map((o) => ({ ...o, user_id: uid })))
+  await upsertChunked('deliveries', deliveries.map((d) => ({ ...d, user_id: uid })))
+  await upsertChunked('payments', payments.map((p) => ({ ...p, user_id: uid })))
 
   localStorage.setItem(PUSH_KEY(uid), String(started - OVERLAP_MS))
   return products.length + txs.length + suppliers.length
+    + orders.length + deliveries.length + payments.length
 }
 
 /* ------------------------------------------------------------------ */
@@ -180,26 +265,48 @@ async function fetchSince(
   }
 }
 
+/**
+ * Every voided row in a table, regardless of watermark. A void flips a flag on an OLD row
+ * without moving its timestamp, so it is invisible to an incremental pull.
+ */
+async function fetchVoided(table: string, uid: string): Promise<Record<string, unknown>[]> {
+  const { data, error } = await supabase!
+    .from(table).select('*').eq('user_id', uid).eq('voided', true)
+  if (error) throw new Error(`${table}: ${error.message}`)
+  return data ?? []
+}
+
 async function pullChanges(uid: string): Promise<number> {
   const started = Date.now()
   const wm = Number(localStorage.getItem(PULL_KEY(uid)) ?? 0)
 
-  const [p, t, s] = await Promise.all([
+  const [p, t, s, o, d, pay] = await Promise.all([
     fetchSince('products', uid, 'updated_at', wm),
     fetchSince('transactions', uid, 'ts', wm),
     fetchSince('suppliers', uid, 'updated_at', wm),
+    fetchSince('purchase_orders', uid, 'updated_at', wm),
+    // created_at, NOT delivered_at / paid_at — see the note in pushChanges.
+    fetchSince('deliveries', uid, 'created_at', wm),
+    fetchSince('payments', uid, 'created_at', wm),
   ])
 
-  // A void updates an OLD ledger row in place; its `ts` never moves, so a ts-based pull would
-  // never see it. Fetch anything flagged voided so the cancellation reaches this device too.
-  const { data: voided, error } = await supabase!
-    .from('transactions').select('*').eq('user_id', uid).eq('voided', true)
-  if (error) throw new Error(`transactions: ${error.message}`)
+  // A void updates an OLD row in place; its `ts` / `created_at` never moves, so a
+  // watermark-based pull would never see it. Fetch anything flagged voided so the cancellation
+  // reaches this device too — otherwise it would keep showing a debt another till already
+  // cancelled.
+  const [voided, voidedD, voidedP] = await Promise.all([
+    fetchVoided('transactions', uid),
+    fetchVoided('deliveries', uid),
+    fetchVoided('payments', uid),
+  ])
 
   const changed = await mergeRemote({
     products: p.map(rowToProduct),
-    transactions: [...t, ...(voided ?? [])].map(rowToTx),
+    transactions: [...t, ...voided].map(rowToTx),
     suppliers: s.map(rowToSupplier),
+    purchase_orders: o.map(rowToOrder),
+    deliveries: [...d, ...voidedD].map(rowToDelivery),
+    payments: [...pay, ...voidedP].map(rowToPayment),
   })
 
   localStorage.setItem(PULL_KEY(uid), String(started - OVERLAP_MS))
@@ -311,6 +418,9 @@ export function startAutoSync(): () => void {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'transactions' }, () => schedule(300))
     .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => schedule(300))
     .on('postgres_changes', { event: '*', schema: 'public', table: 'suppliers' }, () => schedule(300))
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'purchase_orders' }, () => schedule(300))
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'deliveries' }, () => schedule(300))
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'payments' }, () => schedule(300))
     .subscribe()
 
   // Realtime can drop a message on a flaky shop connection, so a slow heartbeat backs it up:

@@ -1,7 +1,10 @@
 import {
   STORES, tx, get, put, getAll, getAllByRange, subscribe, notify, newId, openDb, DB_NAME,
 } from './idb'
-import type { Product, NewProduct, Transaction, TxType, Supplier, CartLine, User } from './types'
+import type {
+  Product, NewProduct, Transaction, TxType, Supplier, CartLine, User,
+  PurchaseOrder, Delivery, Payment,
+} from './types'
 
 interface Actor {
   name: string
@@ -49,7 +52,7 @@ const stockDelta = (t: Transaction): number => (t.type === 'SALE' ? -t.quantity 
  * Must be called inside a transaction that already covers both stores, so the recomputed
  * value cannot be read between the ledger write and the cache update.
  */
-async function recomputeStock(t: IDBTransaction, productId: string): Promise<number> {
+export async function recomputeStock(t: IDBTransaction, productId: string): Promise<number> {
   const rows = await getAllByRange<Transaction>(
     t, STORES.transactions, 'product_id', IDBKeyRange.only(productId),
   )
@@ -454,40 +457,66 @@ export async function importProducts(
 
 export interface Backup {
   format: 'tamaki-savdo'
-  version: 1
+  version: 2
   exported_at: number
   products: Product[]
   transactions: Transaction[]
   suppliers: Supplier[]
+  purchase_orders: PurchaseOrder[]
+  deliveries: Delivery[]
+  payments: Payment[]
 }
 
 export async function exportBackup(): Promise<Backup> {
-  const [products, transactions, suppliers] = await Promise.all([
+  const [products, transactions, rest] = await Promise.all([
     allProducts(),
     fetchAllTransactions(),
-    tx([STORES.suppliers], 'readonly', (t) => getAll<Supplier>(t, STORES.suppliers)),
+    tx(
+      [STORES.suppliers, STORES.purchase_orders, STORES.deliveries, STORES.payments],
+      'readonly',
+      async (t) => ({
+        suppliers: await getAll<Supplier>(t, STORES.suppliers),
+        purchase_orders: await getAll<PurchaseOrder>(t, STORES.purchase_orders),
+        deliveries: await getAll<Delivery>(t, STORES.deliveries),
+        payments: await getAll<Payment>(t, STORES.payments),
+      }),
+    ),
   ])
   return {
     format: 'tamaki-savdo',
-    version: 1,
+    version: 2,
     exported_at: Date.now(),
     products,
     transactions,
-    suppliers,
+    ...rest,
   }
 }
+
+const BACKUP_STORES = [
+  STORES.products, STORES.transactions, STORES.suppliers,
+  STORES.purchase_orders, STORES.deliveries, STORES.payments,
+]
 
 /**
  * Replaces everything with the contents of a backup file. Destructive by design —
  * this is the "my laptop died" path, so callers must confirm first.
+ *
+ * A version-1 file restores too: it simply carries no procurement arrays, and those stores come
+ * back empty (`?? []` below is what makes that work rather than throwing on a missing key).
+ * Refusing an old backup would mean this upgrade stranded the owner's only copy of their data.
  */
-export async function restoreBackup(b: Backup): Promise<{ products: number; transactions: number }> {
+export async function restoreBackup(b: Backup): Promise<{
+  products: number
+  transactions: number
+  deliveries: number
+  payments: number
+}> {
   if (b?.format !== 'tamaki-savdo' || !Array.isArray(b.products) || !Array.isArray(b.transactions)) {
     throw new Error("Bu fayl zaxira nusxa emas (noto'g'ri format)")
   }
 
-  await tx([STORES.products, STORES.transactions, STORES.suppliers], 'readwrite', async (t) => {
-    for (const s of [STORES.products, STORES.transactions, STORES.suppliers]) {
+  await tx(BACKUP_STORES, 'readwrite', async (t) => {
+    for (const s of BACKUP_STORES) {
       await new Promise<void>((res, rej) => {
         const r = t.objectStore(s).clear()
         r.onsuccess = () => res()
@@ -497,10 +526,18 @@ export async function restoreBackup(b: Backup): Promise<{ products: number; tran
     for (const p of b.products) await put(t, STORES.products, p)
     for (const x of b.transactions) await put(t, STORES.transactions, x)
     for (const s of b.suppliers ?? []) await put(t, STORES.suppliers, s)
+    for (const o of b.purchase_orders ?? []) await put(t, STORES.purchase_orders, o)
+    for (const d of b.deliveries ?? []) await put(t, STORES.deliveries, d)
+    for (const p of b.payments ?? []) await put(t, STORES.payments, p)
   })
 
   notify()
-  return { products: b.products.length, transactions: b.transactions.length }
+  return {
+    products: b.products.length,
+    transactions: b.transactions.length,
+    deliveries: (b.deliveries ?? []).length,
+    payments: (b.payments ?? []).length,
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -512,15 +549,23 @@ export async function restoreBackup(b: Backup): Promise<{ products: number; tran
  * because a human reading a backup shouldn't see them; sync must see them, or a deletion made
  * here would never reach the other device.
  */
-export async function snapshotForSync(): Promise<{
+export interface SyncSnapshot {
   products: Product[]
   transactions: Transaction[]
   suppliers: Supplier[]
-}> {
-  return tx([STORES.products, STORES.transactions, STORES.suppliers], 'readonly', async (t) => ({
+  purchase_orders: PurchaseOrder[]
+  deliveries: Delivery[]
+  payments: Payment[]
+}
+
+export async function snapshotForSync(): Promise<SyncSnapshot> {
+  return tx(BACKUP_STORES, 'readonly', async (t) => ({
     products: await getAll<Product>(t, STORES.products),
     transactions: await getAll<Transaction>(t, STORES.transactions),
     suppliers: await getAll<Supplier>(t, STORES.suppliers),
+    purchase_orders: await getAll<PurchaseOrder>(t, STORES.purchase_orders),
+    deliveries: await getAll<Delivery>(t, STORES.deliveries),
+    payments: await getAll<Payment>(t, STORES.payments),
   }))
 }
 
@@ -540,15 +585,15 @@ export async function snapshotForSync(): Promise<{
  * - `current_stock` on an incoming product is IGNORED. It's a cache of that device's view of
  *   the ledger, and this device's ledger is about to differ. Stock is recomputed from the
  *   merged rows instead, which is the whole reason it's derived.
+ *
+ * - Deliveries and payments are MONEY, so they follow the transaction rules exactly: append-only,
+ *   with `voided` merging by OR. Orders are intentions, not money, so they follow the product
+ *   rules: last-write-wins with a tombstone.
  */
-export async function mergeRemote(remote: {
-  products: Product[]
-  transactions: Transaction[]
-  suppliers: Supplier[]
-}): Promise<number> {
+export async function mergeRemote(remote: SyncSnapshot): Promise<number> {
   let changed = 0
 
-  await tx([STORES.products, STORES.transactions, STORES.suppliers], 'readwrite', async (t) => {
+  await tx(BACKUP_STORES, 'readwrite', async (t) => {
     const touched = new Set<string>()
 
     for (const r of remote.transactions) {
@@ -572,10 +617,43 @@ export async function mergeRemote(remote: {
       changed++
     }
 
-    for (const r of remote.suppliers) {
+    for (const r of remote.suppliers ?? []) {
       const cur = await get<Supplier>(t, STORES.suppliers, r.id)
       if (cur && (cur.updated_at ?? 0) >= (r.updated_at ?? 0)) continue
       await put(t, STORES.suppliers, r)
+      changed++
+    }
+
+    // An order is a mutable intention, not money: last-write-wins, exactly like a product.
+    // A lost concurrent edit to an order is annoying; it cannot corrupt a balance.
+    for (const r of remote.purchase_orders ?? []) {
+      const cur = await get<PurchaseOrder>(t, STORES.purchase_orders, r.id)
+      if (cur && (cur.updated_at ?? 0) >= (r.updated_at ?? 0)) continue
+      await put(t, STORES.purchase_orders, r)
+      changed++
+    }
+
+    // Deliveries and payments ARE money, so they get the ledger treatment: append-only, so an
+    // id that already exists is the same row. The one mutable bit is `voided`, and it only ever
+    // goes false -> true — hence OR. Last-write-wins on a void would let a stale device
+    // un-cancel a cancelled delivery and silently re-create a debt the shop already settled.
+    for (const r of remote.deliveries ?? []) {
+      const cur = await get<Delivery>(t, STORES.deliveries, r.id)
+      const voided = Boolean(cur?.voided) || Boolean(r.voided)
+      if (cur && Boolean(cur.voided) === voided) continue
+
+      await put(t, STORES.deliveries, { ...r, voided })
+      // A delivery carries stock as well as debt, so its products need recomputing too.
+      for (const l of r.lines ?? []) touched.add(l.product_id)
+      changed++
+    }
+
+    for (const r of remote.payments ?? []) {
+      const cur = await get<Payment>(t, STORES.payments, r.id)
+      const voided = Boolean(cur?.voided) || Boolean(r.voided)
+      if (cur && Boolean(cur.voided) === voided) continue
+
+      await put(t, STORES.payments, { ...r, voided })
       changed++
     }
 

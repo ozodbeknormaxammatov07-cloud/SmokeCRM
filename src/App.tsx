@@ -7,6 +7,9 @@ import Products from './pages/Products'
 import Sales from './pages/Sales'
 import Restock from './pages/Restock'
 import Reports from './pages/Reports'
+import Firms from './pages/Firms'
+import FirmDetail from './pages/FirmDetail'
+import Orders from './pages/Orders'
 import type { Role } from './lib/types'
 
 const NAV = [
@@ -14,6 +17,7 @@ const NAV = [
   { to: '/sotuv', label: 'Sotuv', icon: '🛒' },
   { to: '/kirim', label: 'Kirim', icon: '📥' },
   { to: '/mahsulotlar', label: 'Mahsulotlar', icon: '📦' },
+  { to: '/firmalar', label: 'Firmalar', icon: '💼' },
   { to: '/hisobot', label: 'Hisobot', icon: '📈' },
 ]
 
@@ -98,13 +102,16 @@ export default function App() {
           <Route path="/sotuv" element={<Sales />} />
           <Route path="/kirim" element={<Restock />} />
           <Route path="/mahsulotlar" element={<Products />} />
+          <Route path="/firmalar" element={<Firms />} />
+          <Route path="/firmalar/:id" element={<FirmDetail />} />
+          <Route path="/buyurtmalar" element={<Orders />} />
           <Route path="/hisobot" element={<Reports />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
 
       {/* Bottom nav — mobile */}
-      <nav className="sm:hidden fixed bottom-0 inset-x-0 z-40 bg-white border-t border-ink-200 grid grid-cols-5 pb-[env(safe-area-inset-bottom)]">
+      <nav className="sm:hidden fixed bottom-0 inset-x-0 z-40 bg-white border-t border-ink-200 grid grid-cols-6 pb-[env(safe-area-inset-bottom)]">
         {NAV.map((n) => (
           <NavLink
             key={n.to}

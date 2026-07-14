@@ -100,15 +100,121 @@ create table if not exists public.suppliers (
 create index if not exists suppliers_user_updated_idx on public.suppliers (user_id, updated_at);
 
 -- ---------------------------------------------------------------------------
+-- Procurement — firms, orders, deliveries, payments
+-- ---------------------------------------------------------------------------
+-- Debt is DERIVED by every device, exactly as stock is:
+--
+--   balance(firm) = sum(deliveries.total_amount) - sum(payments.amount)
+--
+-- so there is deliberately no `balance` column anywhere. A stored balance would be the same
+-- lost-update race a stored stock counter is: two devices, one recording a payment and the
+-- other a delivery while apart, and one write wins.
+--
+-- Deliveries and payments are append-only and corrected ONLY by an opposite-signed twin
+-- (`reversal_of`), which is what lets two offline devices merge them with a plain idempotent
+-- upsert. VOIDED ROWS ARE NOT DELETED, and must be SUMMED rather than skipped — the original
+-- and its twin cancel to zero on their own.
+
+-- `contact` is the phone number. The rest is what you need to actually transfer money to them.
+alter table public.suppliers add column if not exists inn                text;
+alter table public.suppliers add column if not exists bank_account       text;
+alter table public.suppliers add column if not exists bank_name          text;
+alter table public.suppliers add column if not exists bank_mfo           text;
+alter table public.suppliers add column if not exists address            text;
+alter table public.suppliers add column if not exists director           text;
+alter table public.suppliers add column if not exists payment_terms_days integer;
+
+-- An order is an INTENTION: it moves no stock and no money until a delivery arrives against it.
+-- Mutable and last-write-wins, like products. `number` is a human label, never a key.
+create table if not exists public.purchase_orders (
+  user_id      uuid    not null references auth.users(id) on delete cascade,
+  id           text    not null,
+  supplier_id  text    not null,
+  number       text    not null default '',
+  ordered_at   bigint  not null,
+  expected_at  bigint,
+  lines        jsonb   not null default '[]'::jsonb,
+  cancelled_at bigint,   -- the ONE stored status: a human decision, not arithmetic
+  note         text,
+  user_name    text    not null default '',
+  user_role    text    not null default 'admin',
+  created_at   bigint,
+  updated_at   bigint,
+  deleted_at   bigint,   -- tombstone
+  synced_at    timestamptz not null default now(),
+  primary key (user_id, id)
+);
+
+create index if not exists purchase_orders_user_updated_idx
+  on public.purchase_orders (user_id, updated_at);
+
+-- The event that moves stock AND money. The stock half lives in `transactions` as RESTOCK rows
+-- tagged `ref_id = deliveries.id`; this table is the debt half, plus the document reference.
+--
+-- TWO DATES, and the difference is load-bearing:
+--   created_at   — write time. Immutable. THE SYNC WATERMARK.
+--   delivered_at — when the goods really arrived. User-editable, because deliveries get typed
+--                  in days late.
+-- Sync pages on created_at. Paging on delivered_at would drop a backdated delivery behind the
+-- other device's watermark, so it would never replicate — leaving two tills that permanently
+-- disagree about what the shop owes.
+create table if not exists public.deliveries (
+  user_id      uuid    not null references auth.users(id) on delete cascade,
+  id           text    not null,
+  supplier_id  text    not null,
+  order_id     text,     -- optional: goods sometimes arrive without an order
+  created_at   bigint  not null,
+  delivered_at bigint  not null,
+  doc_number   text,     -- faktura number. The paper stays in the folder; we record the number.
+  doc_date     bigint,
+  lines        jsonb   not null default '[]'::jsonb,
+  total_amount numeric not null default 0,   -- snapshotted at write time
+  note         text,
+  user_name    text    not null default '',
+  user_role    text    not null default 'admin',
+  voided       boolean not null default false,
+  reversal_of  text,
+  synced_at    timestamptz not null default now(),
+  primary key (user_id, id)
+);
+
+create index if not exists deliveries_user_created_idx  on public.deliveries (user_id, created_at);
+create index if not exists deliveries_user_supplier_idx on public.deliveries (user_id, supplier_id);
+
+create table if not exists public.payments (
+  user_id     uuid    not null references auth.users(id) on delete cascade,
+  id          text    not null,
+  supplier_id text    not null,
+  amount      numeric not null default 0,
+  created_at  bigint  not null,   -- write time. THE SYNC WATERMARK.
+  paid_at     bigint  not null,   -- when the money really moved. User-editable.
+  method      text    not null default 'cash' check (method in ('cash','bank','card','other')),
+  doc_number  text,               -- to'lov topshiriqnomasi number
+  note        text,
+  user_name   text    not null default '',
+  user_role   text    not null default 'admin',
+  voided      boolean not null default false,
+  reversal_of text,
+  synced_at   timestamptz not null default now(),
+  primary key (user_id, id)
+);
+
+create index if not exists payments_user_created_idx  on public.payments (user_id, created_at);
+create index if not exists payments_user_supplier_idx on public.payments (user_id, supplier_id);
+
+-- ---------------------------------------------------------------------------
 -- Row-level security
 -- ---------------------------------------------------------------------------
 -- The publishable key ships inside the JS bundle and is readable by anyone who opens the
 -- site. RLS is therefore the ONLY thing standing between a stranger and this shop's sales
 -- history. Every table is locked to the owning user; `anon` gets nothing at all.
 
-alter table public.products     enable row level security;
-alter table public.transactions enable row level security;
-alter table public.suppliers    enable row level security;
+alter table public.products        enable row level security;
+alter table public.transactions    enable row level security;
+alter table public.suppliers       enable row level security;
+alter table public.purchase_orders enable row level security;
+alter table public.deliveries      enable row level security;
+alter table public.payments        enable row level security;
 
 -- `TO authenticated` alone would be authentication without authorization — it proves someone
 -- is signed in, not that the row is theirs. The `user_id = auth.uid()` predicate is what does
@@ -160,6 +266,51 @@ create policy suppliers_update on public.suppliers
 create policy suppliers_delete on public.suppliers
   for delete to authenticated using ((select auth.uid()) = user_id);
 
+drop policy if exists purchase_orders_select on public.purchase_orders;
+drop policy if exists purchase_orders_insert on public.purchase_orders;
+drop policy if exists purchase_orders_update on public.purchase_orders;
+drop policy if exists purchase_orders_delete on public.purchase_orders;
+
+create policy purchase_orders_select on public.purchase_orders
+  for select to authenticated using ((select auth.uid()) = user_id);
+create policy purchase_orders_insert on public.purchase_orders
+  for insert to authenticated with check ((select auth.uid()) = user_id);
+create policy purchase_orders_update on public.purchase_orders
+  for update to authenticated
+  using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
+create policy purchase_orders_delete on public.purchase_orders
+  for delete to authenticated using ((select auth.uid()) = user_id);
+
+drop policy if exists deliveries_select on public.deliveries;
+drop policy if exists deliveries_insert on public.deliveries;
+drop policy if exists deliveries_update on public.deliveries;
+drop policy if exists deliveries_delete on public.deliveries;
+
+create policy deliveries_select on public.deliveries
+  for select to authenticated using ((select auth.uid()) = user_id);
+create policy deliveries_insert on public.deliveries
+  for insert to authenticated with check ((select auth.uid()) = user_id);
+create policy deliveries_update on public.deliveries
+  for update to authenticated
+  using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
+create policy deliveries_delete on public.deliveries
+  for delete to authenticated using ((select auth.uid()) = user_id);
+
+drop policy if exists payments_select on public.payments;
+drop policy if exists payments_insert on public.payments;
+drop policy if exists payments_update on public.payments;
+drop policy if exists payments_delete on public.payments;
+
+create policy payments_select on public.payments
+  for select to authenticated using ((select auth.uid()) = user_id);
+create policy payments_insert on public.payments
+  for insert to authenticated with check ((select auth.uid()) = user_id);
+create policy payments_update on public.payments
+  for update to authenticated
+  using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
+create policy payments_delete on public.payments
+  for delete to authenticated using ((select auth.uid()) = user_id);
+
 -- ---------------------------------------------------------------------------
 -- Grants
 -- ---------------------------------------------------------------------------
@@ -172,18 +323,27 @@ create policy suppliers_delete on public.suppliers
 -- TRUNCATE is NOT subject to RLS. Granting is therefore not enough: revoke first, then grant
 -- back only what is needed.
 
-revoke all on public.products     from anon;
-revoke all on public.transactions from anon;
-revoke all on public.suppliers    from anon;
+revoke all on public.products        from anon;
+revoke all on public.transactions    from anon;
+revoke all on public.suppliers       from anon;
+revoke all on public.purchase_orders from anon;
+revoke all on public.deliveries      from anon;
+revoke all on public.payments        from anon;
 
-revoke all on public.products     from authenticated;
-revoke all on public.transactions from authenticated;
-revoke all on public.suppliers    from authenticated;
+revoke all on public.products        from authenticated;
+revoke all on public.transactions    from authenticated;
+revoke all on public.suppliers       from authenticated;
+revoke all on public.purchase_orders from authenticated;
+revoke all on public.deliveries      from authenticated;
+revoke all on public.payments        from authenticated;
 
 -- Exactly the four verbs the sync layer uses. No TRUNCATE, no TRIGGER, no REFERENCES.
-grant select, insert, update, delete on public.products     to authenticated;
-grant select, insert, update, delete on public.transactions to authenticated;
-grant select, insert, update, delete on public.suppliers    to authenticated;
+grant select, insert, update, delete on public.products        to authenticated;
+grant select, insert, update, delete on public.transactions    to authenticated;
+grant select, insert, update, delete on public.suppliers       to authenticated;
+grant select, insert, update, delete on public.purchase_orders to authenticated;
+grant select, insert, update, delete on public.deliveries      to authenticated;
+grant select, insert, update, delete on public.payments        to authenticated;
 
 -- ---------------------------------------------------------------------------
 -- Realtime
@@ -194,6 +354,9 @@ grant select, insert, update, delete on public.suppliers    to authenticated;
 alter publication supabase_realtime add table public.products;
 alter publication supabase_realtime add table public.transactions;
 alter publication supabase_realtime add table public.suppliers;
+alter publication supabase_realtime add table public.purchase_orders;
+alter publication supabase_realtime add table public.deliveries;
+alter publication supabase_realtime add table public.payments;
 
 -- ---------------------------------------------------------------------------
 -- stock_levels — what the shelf actually holds
@@ -219,3 +382,33 @@ create or replace view public.stock_levels with (security_invoker = true) as
 
 revoke all on public.stock_levels from anon;
 grant select on public.stock_levels to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- firm_balances — what the shop owes each firm
+-- ---------------------------------------------------------------------------
+-- The same courtesy `stock_levels` extends for stock: anyone reading this database directly gets
+-- the derived number, instead of hunting for a balance column that deliberately does not exist.
+--
+-- Positive: we owe the firm (qarz). Negative: we have prepaid, so they owe us goods (avans).
+--
+-- VOIDED ROWS ARE SUMMED, NOT FILTERED. A void writes an opposite-signed twin, so the pair
+-- cancels to zero on its own. Adding `where not voided` here would apply the twin alone and
+-- report a balance wrong by twice the delivery — which is exactly the bug this comment exists
+-- to stop someone "fixing" into place.
+--
+-- security_invoker = true is essential: a view runs as its OWNER by default, which would bypass
+-- RLS and let any signed-in user read every shop's debts.
+create or replace view public.firm_balances with (security_invoker = true) as
+  select
+    s.user_id,
+    s.id   as supplier_id,
+    s.name,
+    coalesce((select sum(d.total_amount) from public.deliveries d
+              where d.user_id = s.user_id and d.supplier_id = s.id), 0)
+    - coalesce((select sum(p.amount) from public.payments p
+                where p.user_id = s.user_id and p.supplier_id = s.id), 0) as balance
+  from public.suppliers s
+  where s.deleted_at is null;
+
+revoke all on public.firm_balances from anon;
+grant select on public.firm_balances to authenticated;
