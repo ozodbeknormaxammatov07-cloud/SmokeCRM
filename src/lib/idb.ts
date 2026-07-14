@@ -65,9 +65,51 @@ export function openDb(): Promise<IDBDatabase> {
       }
     }
 
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () =>
+    // Another tab (or the previous version of the app, still open) holds an older-version
+    // connection, so this upgrade cannot proceed until it lets go. Without this handler the
+    // open would hang forever; with it we fail fast with something the user can act on.
+    req.onblocked = () => {
+      dbPromise = null
+      reject(new Error(
+        "Yangilash uchun ilovaning boshqa oynalarini yoping va sahifani yangilang " +
+        '(ilova boshqa varaqda ochiq bo\'lishi mumkin).',
+      ))
+    }
+
+    req.onsuccess = () => {
+      const db = req.result
+
+      // If THIS tab is the one holding an old connection when another tab loads the new
+      // version, step aside so its upgrade isn't blocked. Reload so this tab picks up the new
+      // stores too, rather than carrying on against a schema that's about to change under it.
+      db.onversionchange = () => {
+        db.close()
+        dbPromise = null
+        if (typeof location !== 'undefined') location.reload()
+      }
+
+      // Defensive: if we somehow opened a database that predates the current schema (a blocked
+      // or half-applied upgrade), every procurement write would fail deep inside a transaction
+      // with an unhelpful "object store not found". Catch it here, at the source, with a
+      // message that tells the user what to actually do.
+      const missing = Object.values(STORES).filter((s) => !db.objectStoreNames.contains(s))
+      if (missing.length) {
+        db.close()
+        dbPromise = null
+        reject(new Error(
+          "Ma'lumotlar bazasi eski versiyada qolib ketdi. Ilovaning barcha oynalarini " +
+          'yopib, sahifani qayta yuklang.',
+        ))
+        return
+      }
+
+      resolve(db)
+    }
+
+    req.onerror = () => {
+      dbPromise = null
       reject(new Error("Brauzer ma'lumotlar bazasini ocholmadi (IndexedDB o'chirilgan bo'lishi mumkin)"))
+    }
   })
 
   return dbPromise
