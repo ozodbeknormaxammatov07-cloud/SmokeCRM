@@ -60,11 +60,22 @@ try {
   // ---------------------------------------------------------------- 1
   await page.goto(URL)
   await page.waitForTimeout(1200)
+
+  // The app now opens behind a login. On a fresh browser that means "create the first admin".
+  const atSetup = await page.getByText('Birinchi administrator').isVisible().catch(() => false)
+  await page.locator('input').first().fill('Boss')
+  await page.locator('input[type=password]').fill('boss123')
+  await page.getByRole('button', { name: /Yaratish va kirish/ }).click()
+  await page.waitForTimeout(1000)
+  log(atSetup ? '✅' : '❌', 'Create the first administrator on a cold start',
+    'fresh browser shows the create-admin screen; created Boss and signed in')
+  if (!atSetup) problems.push('Cold start did not show the create-first-admin screen')
+
   const heading = await page.locator('h1').first().innerText()
   await shot('01-dashboard-empty')
-  log(heading.includes('Boshqaruv') ? '✅' : '❌', 'Load the app cold (empty IndexedDB)',
+  log(heading.includes('Boshqaruv') ? '✅' : '❌', 'Land on the dashboard as admin',
     `h1 = "${heading}"`)
-  if (!heading.includes('Boshqaruv')) problems.push('App did not reach the dashboard')
+  if (!heading.includes('Boshqaruv')) problems.push('App did not reach the dashboard after login')
 
   // ---------------------------------------------------------------- 2
   await nav('Mahsulotlar')
@@ -342,6 +353,49 @@ try {
   log(stillSettled && noNewDebt ? '🔍' : '❌', 'PROBE: receiving goods paid in cash leaves no debt',
     `delivery + settling payment committed together — the firm still owes nothing`)
   if (!(stillSettled && noNewDebt)) problems.push(`Cash-at-receipt left a debt. Saw: ${firmsAfterCash.slice(0, 200)}`)
+
+  // --- roles: an admin creates a cashier, who can only sell -------------------
+  await nav('Xodimlar')
+  await page.getByRole('button', { name: '+ Xodim' }).click()
+  await page.waitForTimeout(300)
+  await page.locator('input').first().fill('Dilnoza')
+  await page.getByRole('button', { name: 'Kassir' }).click()
+  await page.locator('input[type=password]').fill('kassa123')
+  await page.getByRole('button', { name: 'Saqlash' }).click()
+  await page.waitForTimeout(700)
+  log('✅', 'admin creates a cashier account', 'Dilnoza (Kassir) added in Xodimlar')
+
+  // Log out, log in as the cashier.
+  await page.getByText('Boss').first().click()          // sidebar user -> logout
+  await page.waitForTimeout(600)
+  await page.locator('input').first().fill('Dilnoza')
+  await page.locator('input[type=password]').fill('kassa123')
+  await page.getByRole('button', { name: 'Kirish' }).click()
+  await page.waitForTimeout(900)
+
+  const cashierNav = await page.locator('aside nav').innerText().catch(() => '')
+  const hidesAdmin = !/Firmalar|Hisobot|Kirim|Boshqaruv|Xodimlar/.test(cashierNav)
+  await shot('16-cashier-view')
+  log(hidesAdmin ? '🔍' : '❌', 'PROBE: the cashier nav hides every admin area',
+    `only Sotuv and Mahsulotlar are offered — saw "${cashierNav.replace(/\n+/g, ' ').trim()}"`)
+  if (!hidesAdmin) problems.push(`Cashier saw admin tabs: ${cashierNav.replace(/\n+/g, ' ')}`)
+
+  // The route guard: typing a blocked URL bounces the cashier back to Sotuv.
+  await page.goto(`${URL}#/hisobot`)
+  await page.waitForTimeout(700)
+  const bounced = page.url().endsWith('#/sotuv')
+  log(bounced ? '🔍' : '❌', 'PROBE: a blocked URL redirects the cashier',
+    '#/hisobot bounced back to #/sotuv')
+  if (!bounced) problems.push(`Cashier reached a blocked route: ${page.url()}`)
+
+  // Cost price and margin must not be visible to the cashier on the product list.
+  await nav('Mahsulotlar')
+  await page.waitForTimeout(500)
+  const thead = await page.locator('table thead').innerText().catch(() => '')
+  const noCost = thead.length > 0 && !/Kelish|Marja|Foyda/.test(thead)
+  log(noCost ? '🔍' : '❌', 'PROBE: the cashier cannot see cost or margin',
+    `product table hides Kelish / Foyda / Marja — saw columns "${thead.replace(/\n+/g, ' ').trim()}"`)
+  if (!noCost) problems.push(`Cashier saw cost/margin columns: ${thead.replace(/\n+/g, ' ')}`)
 
   // ---------------------------------------------------------------- 10 PROBE
   await page.setViewportSize({ width: 390, height: 844 })
