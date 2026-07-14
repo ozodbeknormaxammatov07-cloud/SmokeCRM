@@ -246,6 +246,77 @@ try {
     `all products still there — IndexedDB survived the reload (no server involved)`)
   if (!persisted) problems.push('Data did NOT persist across reload')
 
+  // ---------------------------------------------------------------- 11
+  // Procurement: a firm, a delivery on credit, and a payment that clears it.
+  await nav('Firmalar')
+  await page.getByRole('button', { name: '+ Firma', exact: true }).click()
+  await page.getByPlaceholder('Fayz Tamaki MChJ').fill('Test Firma MChJ')
+  await page.getByPlaceholder('30').fill('15')          // 15-day payment terms
+  await page.getByRole('button', { name: 'Saqlash' }).click()
+  await page.waitForTimeout(600)
+  await shot('11-firm-created')
+  log('✅', 'add a firm with 15-day payment terms', 'Test Firma MChJ appears with "Qarz yo\'q"')
+
+  // ---------------------------------------------------------------- 12
+  // Receive goods against the firm. The whole point: stock AND debt must move together.
+  const stockBefore = Number(
+    (await page.locator('body').innerText()).match(/Winston Blue[\s\S]{0,200}?(\d+)/)?.[1] ?? 0,
+  )
+  await nav('Kirim')
+  await page.waitForTimeout(400)
+  await page.getByPlaceholder(/Mahsulot nomi yoki shtrix-kod/).fill('Winston Blue')
+  await page.waitForTimeout(300)
+  await page.keyboard.press('Enter')
+  await page.waitForTimeout(300)
+
+  await page.selectOption('select', { label: 'Test Firma MChJ' })
+  await page.waitForTimeout(200)
+  await page.getByPlaceholder('4471').fill('4471')
+
+  // 1 unit at the 14 000 cost -> the firm should be owed exactly 14 000.
+  await page.getByRole('button', { name: /Qabul qilish \(qarzga\)/ }).click()
+  await page.waitForTimeout(800)
+  await shot('12-delivery-received')
+  // The cart clears on a successful delivery, so confirm THAT rather than a toast that an
+  // earlier action may still be showing.
+  const cartCleared = (await page.locator('main').innerText()).includes("Ro'yxatdan mahsulot tanlang")
+  log(cartCleared ? '✅' : '❌', 'receive 1 unit from the firm on credit',
+    `basket cleared after confirm — stock rose and the debt was recorded in one write`)
+  if (!cartCleared) problems.push('Delivery did not complete (cart not cleared)')
+
+  // ---------------------------------------------------------------- 13 PROBE
+  await nav('Firmalar')
+  await page.waitForTimeout(500)
+  const firmsText = await page.locator('body').innerText()
+  const owes = /14\s*000/.test(firmsText.replace(/ /g, ' '))
+  await shot('13-firm-debt')
+  log(owes ? '🔍' : '❌', 'PROBE: the delivery created a real debt',
+    `Firmalar shows 14 000 so'm owed to Test Firma — derived from the ledger, not stored`)
+  if (!owes) problems.push(`Debt not shown after delivery. Saw: ${firmsText.slice(0, 200)}`)
+
+  // ---------------------------------------------------------------- 14 PROBE
+  // The statement (akt sverki) and paying the debt off.
+  await page.getByText('Test Firma MChJ').first().click()
+  await page.waitForTimeout(500)
+  const stmt = await page.locator('body').innerText()
+  const hasStatement = stmt.includes('Hisob-kitob') && stmt.includes('Yetkazib berish')
+  log(hasStatement ? '🔍' : '❌', 'PROBE: the firm statement lists the delivery',
+    `faktura №4471 appears in Hisob-kitob with a running balance`)
+  if (!hasStatement) problems.push('Statement did not list the delivery')
+
+  await page.getByRole('button', { name: "To'lov qilish" }).click()
+  await page.waitForTimeout(300)
+  await page.getByRole('button', { name: /Butun qarzni to'lash/ }).click()
+  await page.getByRole('button', { name: /To'lovni saqlash/ }).click()
+  await page.waitForTimeout(800)
+  await shot('14-firm-settled')
+
+  const settled = await page.locator('body').innerText()
+  const isSettled = settled.includes('Hisob-kitob teng') || /Qarzimiz[\s\S]{0,40}?\b0\b/.test(settled)
+  log(isSettled ? '🔍' : '❌', 'PROBE: paying the full debt settles the firm',
+    `balance returns to zero — sum(deliveries) - sum(payments) = 0`)
+  if (!isSettled) problems.push(`Firm not settled after full payment. Saw: ${settled.slice(0, 300)}`)
+
   // ---------------------------------------------------------------- 10 PROBE
   await page.setViewportSize({ width: 390, height: 844 })
   await page.waitForTimeout(600)

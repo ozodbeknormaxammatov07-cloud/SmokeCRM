@@ -3,10 +3,15 @@ import { Link } from 'react-router-dom'
 import { useStore } from '../store'
 import { watchTransactions } from '../lib/db'
 import { totals, bestSellers, reorderList, inventoryValue, stockLevel } from '../lib/analytics'
+import {
+  supplierBalance, unpaidDeliveries, forSupplier, orderStatus,
+} from '../lib/payables'
 import { money, moneyShort, num, pct, startOfDay, endOfDay, isoDay, daysAgo, dateTimeLabel } from '../lib/format'
 import { Page, Kpi, StockBadge } from '../components/ui'
 import { BestSellersChart } from '../components/charts'
 import type { Transaction } from '../lib/types'
+
+const WEEK = 7 * 86_400_000
 
 const RANGES = [
   { key: 'today', label: 'Bugun', from: () => isoDay(Date.now()) },
@@ -15,7 +20,7 @@ const RANGES = [
 ] as const
 
 export default function Dashboard() {
-  const { products, recent } = useStore()
+  const { products, recent, suppliers, deliveries, payments, orders } = useStore()
   const [rangeKey, setRangeKey] = useState<(typeof RANGES)[number]['key']>('today')
   const [txs, setTxs] = useState<Transaction[]>([])
 
@@ -34,6 +39,31 @@ export default function Dashboard() {
 
   const outCount = reorder.filter((p) => p.current_stock <= 0).length
   const lastSales = recent.filter((x) => x.type === 'SALE' && !x.voided && !x.reversal_of).slice(0, 6)
+
+  // What we owe the firms. Only positive balances count towards the total — a firm we have
+  // prepaid is not a debt, and netting it against another firm's debt would understate what
+  // actually has to be paid out.
+  const payables = useMemo(() => {
+    let totalDebt = 0
+    let overdueCount = 0
+
+    for (const f of suppliers) {
+      const ds = forSupplier(deliveries, f.id)
+      const ps = forSupplier(payments, f.id)
+      totalDebt += Math.max(0, supplierBalance(ds, ps))
+      overdueCount += unpaidDeliveries(ds, ps, f.payment_terms_days ?? 0)
+        .filter((u) => u.daysOverdue > 0).length
+    }
+
+    const soon = Date.now() + WEEK
+    const incoming = orders.filter((o) => {
+      const st = orderStatus(o, deliveries)
+      return (st === 'waiting' || st === 'partial' || st === 'overdue')
+        && o.expected_at != null && o.expected_at <= soon
+    }).length
+
+    return { totalDebt, overdueCount, incoming }
+  }, [suppliers, deliveries, payments, orders])
 
   return (
     <Page
@@ -77,6 +107,34 @@ export default function Dashboard() {
           tone={outCount ? 'bad' : reorder.length ? 'warn' : 'good'}
         />
       </div>
+
+      {/* Payables. Hidden until there is at least one firm, so a shop that doesn't buy on
+          credit never sees three widgets reading zero. */}
+      {!!suppliers.length && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mt-3 sm:mt-4">
+          <Link to="/firmalar" className="contents">
+            <Kpi
+              label="Firmalarga qarz"
+              value={moneyShort(payables.totalDebt)}
+              sub={
+                payables.overdueCount
+                  ? `${num(payables.overdueCount)} ta kechikkan to'lov`
+                  : payables.totalDebt
+                    ? 'muddati yetmagan'
+                    : 'qarz yo\'q'
+              }
+              tone={payables.overdueCount ? 'bad' : payables.totalDebt ? 'warn' : 'good'}
+            />
+          </Link>
+          <Link to="/buyurtmalar" className="contents">
+            <Kpi
+              label="Kutilayotgan yetkazib berish"
+              value={`${num(payables.incoming)} ta`}
+              sub="shu hafta ichida"
+            />
+          </Link>
+        </div>
+      )}
 
       <div className="grid lg:grid-cols-2 gap-4 mt-4">
         <section className="card p-4">
