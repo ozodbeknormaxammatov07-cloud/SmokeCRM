@@ -3,6 +3,7 @@ import {
   hashPassword, verifyPassword, hasAnyAccount, listAccounts, countAdmins,
   createAccount, updateAccountPassword, removeAccount, login, can,
 } from '../src/lib/auth'
+import { exportBackup } from '../src/lib/db'
 
 let fail = 0
 const eq = (name: string, got: unknown, want: unknown) => {
@@ -59,6 +60,15 @@ async function main() {
   const caps = ['view-dashboard','receive-stock','view-firms','view-reports','manage-products','void','manage-staff'] as const
   ok('admin can do everything', caps.every((c) => can('admin', c)))
   ok('cashier can do none of the gated things', caps.every((c) => !can('cashier', c)))
+
+  console.log('\n=== a backup never carries accounts or password hashes ===')
+  // A backup file gets emailed and shared. It must never leak the shop's logins.
+  await createAccount({ name: 'BackupAdmin', role: 'admin', password: 'secretpw' })
+  const backup = await exportBackup()
+  const serialized = JSON.stringify(backup)
+  ok('backup has no users array', !('users' in (backup as Record<string, unknown>)))
+  ok('backup does not contain the password anywhere', !serialized.includes('secretpw'))
+  ok('backup does not contain any password_hash field', !serialized.includes('password_hash'))
 
   console.log(fail === 0 ? '\n✅ ALL AUTH CHECKS PASSED\n' : `\n❌ ${fail} CHECK(S) FAILED\n`)
   process.exit(fail === 0 ? 0 : 1)
