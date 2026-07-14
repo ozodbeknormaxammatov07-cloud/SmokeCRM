@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from 'react'
 import { initDb, watchProducts, watchRecentTransactions, watchSuppliers } from './lib/db'
+import { startAutoSync } from './lib/sync'
 import type { Product, Transaction, Supplier, Role } from './lib/types'
 
 const BASE_BRANDS = ['UzBat', 'Parliament', 'Winston', 'Esse']
@@ -78,6 +79,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }),
           watchRecentTransactions(300, setRecent),
           watchSuppliers(setSuppliers),
+          // Cloud backup is strictly additive: if it's unconfigured or the network is down,
+          // this is a no-op and the till carries on exactly as before.
+          startAutoSync(),
         ]
       })
       .catch((e: Error) => {
