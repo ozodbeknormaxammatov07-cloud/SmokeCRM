@@ -7,6 +7,16 @@ export interface Product {
   brand: string
   cost_price: number
   selling_price: number
+  /**
+   * DERIVED, never authoritative. It is a cache of the ledger — the signed sum of every
+   * transaction row for this product — kept on the record so the till doesn't have to
+   * re-scan history on every keystroke.
+   *
+   * It is a cache because two devices editing one counter is a lost-update race: both read
+   * 10, both sell 3, one write wins, and the shop has sold 6 packets but only decremented 3.
+   * The ledger is append-only, so two devices appending sales merge cleanly and the stock
+   * falls out as a sum. Recomputed by `recomputeStock` after any local write or remote merge.
+   */
   current_stock: number
   reorder_threshold: number
   barcode?: string
@@ -14,6 +24,12 @@ export interface Product {
   active: boolean
   created_at?: number
   updated_at?: number
+  /**
+   * Tombstone. A deleted product is flagged, not removed, because sync cannot tell "deleted
+   * here" apart from "created on the other device and not yet pulled" — and guessing deletes
+   * the other device's work.
+   */
+  deleted_at?: number
 }
 
 /**
@@ -49,6 +65,8 @@ export interface Supplier {
   name: string
   contact?: string
   note?: string
+  updated_at?: number
+  deleted_at?: number
 }
 
 export interface User {

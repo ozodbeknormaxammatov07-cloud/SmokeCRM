@@ -1,5 +1,5 @@
 import {
-  STORES, tx, get, put, del, getAll, getAllByRange, subscribe, notify, newId, openDb, DB_NAME,
+  STORES, tx, get, put, getAll, getAllByRange, subscribe, notify, newId, openDb, DB_NAME,
 } from './idb'
 import type { Product, NewProduct, Transaction, TxType, Supplier, CartLine, User } from './types'
 
@@ -33,9 +33,40 @@ function watch<T>(query: () => Promise<T>, cb: (rows: T) => void): () => void {
 /* Products                                                            */
 /* ------------------------------------------------------------------ */
 
+/**
+ * The signed effect of one ledger row on stock.
+ *
+ * Voided rows are NOT skipped: a void writes an opposite-signed twin, so original and twin
+ * cancel to zero on their own. Skipping the original would apply the twin alone and silently
+ * invent stock — the same double-counting trap the reports fell into.
+ */
+const stockDelta = (t: Transaction): number => (t.type === 'SALE' ? -t.quantity : t.quantity)
+
+/**
+ * Recomputes a product's stock from its ledger rows. This is the ONLY thing allowed to write
+ * `current_stock`: it is a cache of the ledger, and the ledger is the truth.
+ *
+ * Must be called inside a transaction that already covers both stores, so the recomputed
+ * value cannot be read between the ledger write and the cache update.
+ */
+async function recomputeStock(t: IDBTransaction, productId: string): Promise<number> {
+  const rows = await getAllByRange<Transaction>(
+    t, STORES.transactions, 'product_id', IDBKeyRange.only(productId),
+  )
+  const stock = rows.reduce((s, r) => s + stockDelta(r), 0)
+
+  const p = await get<Product>(t, STORES.products, productId)
+  if (p && p.current_stock !== stock) {
+    await put(t, STORES.products, { ...p, current_stock: stock })
+  }
+  return stock
+}
+
 const allProducts = (): Promise<Product[]> =>
   tx([STORES.products], 'readonly', (t) => getAll<Product>(t, STORES.products)).then((rows) =>
-    rows.sort((a, b) => a.name.localeCompare(b.name)),
+    rows
+      .filter((p) => !p.deleted_at) // tombstones stay in the store, out of the UI
+      .sort((a, b) => a.name.localeCompare(b.name)),
   )
 
 export function watchProducts(cb: (rows: Product[]) => void): () => void {
@@ -52,7 +83,8 @@ export async function createProduct(p: NewProduct, actor: Actor): Promise<string
   const now = Date.now()
 
   await tx([STORES.products, STORES.transactions], 'readwrite', async (t) => {
-    await put(t, STORES.products, { ...p, id, created_at: now, updated_at: now })
+    // Stock starts at zero and is derived from the opening RESTOCK row below.
+    await put(t, STORES.products, { ...p, id, current_stock: 0, created_at: now, updated_at: now })
 
     if (p.current_stock > 0) {
       await put(t, STORES.transactions, {
@@ -73,6 +105,8 @@ export async function createProduct(p: NewProduct, actor: Actor): Promise<string
         ref_id: newId(),
         voided: false,
       } satisfies Transaction)
+
+      await recomputeStock(t, id)
     }
   })
 
@@ -105,8 +139,18 @@ export async function updateProduct(
   notify()
 }
 
+/**
+ * Soft delete. The row survives as a tombstone so the deletion can replicate: a hard delete
+ * is indistinguishable, to the other device, from a product it created and we haven't pulled
+ * yet — and "it's missing, so remove it" is how two devices delete each other's work.
+ */
 export async function deleteProduct(id: string): Promise<void> {
-  await tx([STORES.products], 'readwrite', (t) => del(t, STORES.products, id))
+  await tx([STORES.products], 'readwrite', async (t) => {
+    const cur = await get<Product>(t, STORES.products, id)
+    if (!cur) return
+    const now = Date.now()
+    await put(t, STORES.products, { ...cur, deleted_at: now, updated_at: now })
+  })
   notify()
 }
 
@@ -148,20 +192,21 @@ export async function commitCart(
       fresh.set(pid, p)
     }
 
+    // Guard against overselling BEFORE anything is written. The cached stock is read inside
+    // this transaction, so a double-tapped confirm cannot slip between the check and the write.
     for (const [pid, qty] of wanted) {
       const p = fresh.get(pid)!
-      const next = p.current_stock + (type === 'SALE' ? -qty : qty)
-      if (next < 0) throw new StockError(p.name, p.current_stock, qty)
+      if (p.current_stock + (type === 'SALE' ? -qty : qty) < 0) {
+        throw new StockError(p.name, p.current_stock, qty)
+      }
 
-      const updated: Product = { ...p, current_stock: next, updated_at: ts }
       // A restock at a new cost becomes the product's cost going forward.
       if (type === 'RESTOCK') {
         const line = lines.find((l) => l.product.id === pid)!
         if (line.unit_price > 0 && line.unit_price !== p.cost_price) {
-          updated.cost_price = line.unit_price
+          await put(t, STORES.products, { ...p, cost_price: line.unit_price, updated_at: ts })
         }
       }
-      await put(t, STORES.products, updated)
     }
 
     let total = 0
@@ -195,6 +240,9 @@ export async function commitCart(
       } satisfies Transaction)
     }
 
+    // Stock is derived: now that the ledger rows exist, the cache follows from them.
+    for (const pid of wanted.keys()) await recomputeStock(t, pid)
+
     return { ref_id, total, profit }
   })
 
@@ -215,13 +263,12 @@ export async function voidTransaction(t0: Transaction, actor: Actor): Promise<vo
     if (!original) throw new Error('Yozuv topilmadi')
     if (original.voided) throw new Error('Bu amal allaqachon bekor qilingan')
 
-    // Reversing a SALE returns stock; reversing a RESTOCK removes it.
+    // Reversing a SALE returns stock; reversing a RESTOCK removes it — and removing it must
+    // not drive the shelf negative.
     const delta = original.type === 'SALE' ? original.quantity : -original.quantity
     const p = await get<Product>(t, STORES.products, original.product_id)
-    if (p) {
-      const next = p.current_stock + delta
-      if (next < 0) throw new StockError(original.product_name, p.current_stock, original.quantity)
-      await put(t, STORES.products, { ...p, current_stock: next, updated_at: Date.now() })
+    if (p && p.current_stock + delta < 0) {
+      throw new StockError(original.product_name, p.current_stock, original.quantity)
     }
 
     await put(t, STORES.transactions, { ...original, voided: true })
@@ -244,6 +291,8 @@ export async function voidTransaction(t0: Transaction, actor: Actor): Promise<vo
       voided: false,
       reversal_of: original.id,
     } satisfies Transaction)
+
+    await recomputeStock(t, original.product_id)
   })
 
   notify()
@@ -262,7 +311,8 @@ export async function adjustStock(
     const delta = newStock - p.current_stock
     if (delta === 0) return
 
-    await put(t, STORES.products, { ...p, current_stock: newStock, updated_at: Date.now() })
+    // The correction is posted as a ledger row and the stock follows from it — writing the
+    // count straight onto the product would put it back out of step with its own history.
     await put(t, STORES.transactions, {
       id: newId(),
       ts: Date.now(),
@@ -281,6 +331,8 @@ export async function adjustStock(
       ref_id: newId(),
       voided: false,
     } satisfies Transaction)
+
+    await recomputeStock(t, p.id)
   })
 
   notify()
@@ -318,7 +370,7 @@ export function watchSuppliers(cb: (rows: Supplier[]) => void): () => void {
   return watch(
     () =>
       tx([STORES.suppliers], 'readonly', (t) => getAll<Supplier>(t, STORES.suppliers)).then((rows) =>
-        rows.sort((a, b) => a.name.localeCompare(b.name)),
+        rows.filter((s) => !s.deleted_at).sort((a, b) => a.name.localeCompare(b.name)),
       ),
     cb,
   )
@@ -326,13 +378,19 @@ export function watchSuppliers(cb: (rows: Supplier[]) => void): () => void {
 
 export async function saveSupplier(s: Omit<Supplier, 'id'> & { id?: string }): Promise<void> {
   await tx([STORES.suppliers], 'readwrite', (t) =>
-    put(t, STORES.suppliers, { ...s, id: s.id ?? newId() }),
+    put(t, STORES.suppliers, { ...s, id: s.id ?? newId(), updated_at: Date.now() }),
   )
   notify()
 }
 
+/** Soft delete, for the same reason products are: see `deleteProduct`. */
 export async function deleteSupplier(id: string): Promise<void> {
-  await tx([STORES.suppliers], 'readwrite', (t) => del(t, STORES.suppliers, id))
+  await tx([STORES.suppliers], 'readwrite', async (t) => {
+    const cur = await get<Supplier>(t, STORES.suppliers, id)
+    if (!cur) return
+    const now = Date.now()
+    await put(t, STORES.suppliers, { ...cur, deleted_at: now, updated_at: now })
+  })
   notify()
 }
 
@@ -355,7 +413,9 @@ export async function importProducts(
     let n = 0
     for (const r of rows) {
       const id = newId()
-      await put(t, STORES.products, { ...r, id, created_at: ts, updated_at: ts } satisfies Product)
+      await put(t, STORES.products, {
+        ...r, id, current_stock: 0, created_at: ts, updated_at: ts,
+      } satisfies Product)
 
       if (r.current_stock > 0) {
         await put(t, STORES.transactions, {
@@ -376,6 +436,8 @@ export async function importProducts(
           ref_id: 'import',
           voided: false,
         } satisfies Transaction)
+
+        await recomputeStock(t, id)
       }
       n++
     }
@@ -439,6 +501,90 @@ export async function restoreBackup(b: Backup): Promise<{ products: number; tran
 
   notify()
   return { products: b.products.length, transactions: b.transactions.length }
+}
+
+/* ------------------------------------------------------------------ */
+/* Sync: snapshot out, merge in                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Everything this device holds, tombstones included. `exportBackup` hides deleted products
+ * because a human reading a backup shouldn't see them; sync must see them, or a deletion made
+ * here would never reach the other device.
+ */
+export async function snapshotForSync(): Promise<{
+  products: Product[]
+  transactions: Transaction[]
+  suppliers: Supplier[]
+}> {
+  return tx([STORES.products, STORES.transactions, STORES.suppliers], 'readonly', async (t) => ({
+    products: await getAll<Product>(t, STORES.products),
+    transactions: await getAll<Transaction>(t, STORES.transactions),
+    suppliers: await getAll<Supplier>(t, STORES.suppliers),
+  }))
+}
+
+/**
+ * Merges rows from another device into this one. Returns how many rows actually changed, so
+ * a no-op sync doesn't wake the whole UI up.
+ *
+ * The merge rules are what make two devices safe to run at once:
+ *
+ * - Transactions are append-only and immutable, so an id that already exists is the same row.
+ *   The one mutable bit is `voided`, and it only ever goes false -> true — so it merges with
+ *   OR. Last-write-wins on a void would let a stale device un-cancel a cancelled sale.
+ *
+ * - Products are last-write-wins on `updated_at`. A tombstone is just another update, so a
+ *   delete propagates like any other edit rather than by absence.
+ *
+ * - `current_stock` on an incoming product is IGNORED. It's a cache of that device's view of
+ *   the ledger, and this device's ledger is about to differ. Stock is recomputed from the
+ *   merged rows instead, which is the whole reason it's derived.
+ */
+export async function mergeRemote(remote: {
+  products: Product[]
+  transactions: Transaction[]
+  suppliers: Supplier[]
+}): Promise<number> {
+  let changed = 0
+
+  await tx([STORES.products, STORES.transactions, STORES.suppliers], 'readwrite', async (t) => {
+    const touched = new Set<string>()
+
+    for (const r of remote.transactions) {
+      const cur = await get<Transaction>(t, STORES.transactions, r.id)
+      // Once voided, always voided — never let an older copy resurrect a cancelled sale.
+      const voided = Boolean(cur?.voided) || Boolean(r.voided)
+      if (cur && Boolean(cur.voided) === voided) continue
+
+      await put(t, STORES.transactions, { ...r, voided })
+      touched.add(r.product_id)
+      changed++
+    }
+
+    for (const r of remote.products) {
+      const cur = await get<Product>(t, STORES.products, r.id)
+      if (cur && (cur.updated_at ?? 0) >= (r.updated_at ?? 0)) continue
+
+      // Keep OUR stock cache; it is rebuilt from the ledger below regardless.
+      await put(t, STORES.products, { ...r, current_stock: cur?.current_stock ?? 0 })
+      touched.add(r.id)
+      changed++
+    }
+
+    for (const r of remote.suppliers) {
+      const cur = await get<Supplier>(t, STORES.suppliers, r.id)
+      if (cur && (cur.updated_at ?? 0) >= (r.updated_at ?? 0)) continue
+      await put(t, STORES.suppliers, r)
+      changed++
+    }
+
+    // Any product whose ledger or record moved gets its stock rebuilt from the merged truth.
+    for (const pid of touched) await recomputeStock(t, pid)
+  })
+
+  if (changed) notify()
+  return changed
 }
 
 /** Confirms the browser can actually persist. Called once at startup. */

@@ -1,22 +1,37 @@
 import { supabase, currentSession } from './supabase'
-import { exportBackup, restoreBackup } from './db'
+import { snapshotForSync, mergeRemote } from './db'
 import { subscribe } from './idb'
 import type { Product, Transaction, Supplier } from './types'
 
 /**
- * Cloud replication. IndexedDB is the source of truth; this pushes a copy to Supabase so a
- * dead laptop or a cleared browser isn't the end of the shop's history.
+ * Two-way sync between this device's IndexedDB and the shop's Supabase row.
  *
- * The till never waits on any of this. A sale commits to IndexedDB and returns; the push
- * happens afterwards, and if it fails — no internet, server down — the data is already safe
- * locally and the next push catches up. Selling must never stop because the network did.
+ * IndexedDB is still where a sale is committed — the till never waits on the network, and it
+ * keeps working with the wifi down. Supabase is the meeting point: each device pushes what it
+ * wrote and pulls what the others wrote.
+ *
+ * Everyone signs into the SAME shop account, so `user_id` identifies the shop, not the person.
+ * Who rang up a sale is already recorded on the ledger row itself (`user_name`).
+ *
+ * Why this is safe to run on two devices at once:
+ *
+ *  - The ledger is append-only with UUID keys, so it is a grow-only set: two devices appending
+ *    sales can never overwrite each other, in any order, online or off.
+ *  - Stock is DERIVED from that ledger, not stored. There is no counter for two devices to
+ *    race on — the sum simply includes both their rows once they meet.
+ *  - Deletes are tombstones. Nothing is ever removed because it is "missing", which is what
+ *    made the previous backup-only design delete the other device's products.
+ *
+ * The one thing it cannot prevent: two devices, both offline, both selling the last packet.
+ * Nothing can, short of requiring the network for every sale. When they reconnect, the ledger
+ * adds up to a negative stock — which is surfaced rather than hidden, so the shop recounts.
  */
 
 const CHUNK = 500
 const PAGE = 1000
-/** Re-push a few seconds either side of the watermark. Upserts are idempotent, so overlapping
- *  is free — whereas a row lost to a clock skew of one millisecond is lost for good. */
-const OVERLAP_MS = 10_000
+/** Overlap the watermark: an upsert is idempotent, so re-sending is free, whereas a row lost
+ *  to a millisecond of clock skew between two devices is lost for good. */
+const OVERLAP_MS = 30_000
 
 export type SyncPhase = 'off' | 'signed-out' | 'idle' | 'syncing' | 'offline' | 'error'
 
@@ -25,18 +40,16 @@ export interface SyncState {
   lastSyncedAt: number | null
   error: string | null
   email: string | null
-  /** This device is empty but the cloud is not: a restore is waiting to happen. */
-  needsRestore: boolean
+  /** Stock went below zero: two devices sold the same packet while apart. Needs a recount. */
+  oversold: string[]
 }
 
 let state: SyncState = {
-  phase: 'off', lastSyncedAt: null, error: null, email: null, needsRestore: false,
+  phase: 'off', lastSyncedAt: null, error: null, email: null, oversold: [],
 }
 const listeners = new Set<(s: SyncState) => void>()
 
-export function syncState(): SyncState {
-  return state
-}
+export const syncState = (): SyncState => state
 
 export function onSyncState(fn: (s: SyncState) => void): () => void {
   listeners.add(fn)
@@ -50,15 +63,15 @@ function setState(patch: Partial<SyncState>) {
 }
 
 const LAST_KEY = (uid: string) => `ts.sync.last.${uid}`
-const WM_KEY = (uid: string) => `ts.sync.wm.${uid}`
+const PULL_KEY = (uid: string) => `ts.sync.pulled.${uid}`
+const PUSH_KEY = (uid: string) => `ts.sync.pushed.${uid}`
 
 /* ------------------------------------------------------------------ */
-/* Row <-> app-object mapping                                          */
+/* Row mapping                                                         */
 /* ------------------------------------------------------------------ */
 
-// PostgREST hands back `numeric` as a JSON number, but a driver or a schema tweak turning it
-// into a string would corrupt every total silently. Coerce rather than trust.
 const n = (v: unknown): number => (typeof v === 'number' ? v : Number(v ?? 0)) || 0
+const nOrU = (v: unknown): number | undefined => (v == null ? undefined : n(v))
 
 const rowToProduct = (r: Record<string, unknown>): Product => ({
   id: String(r.id),
@@ -66,13 +79,14 @@ const rowToProduct = (r: Record<string, unknown>): Product => ({
   brand: String(r.brand ?? ''),
   cost_price: n(r.cost_price),
   selling_price: n(r.selling_price),
-  current_stock: n(r.current_stock),
+  current_stock: 0, // derived locally; the sender's cache is meaningless here
   reorder_threshold: n(r.reorder_threshold),
   barcode: (r.barcode as string) ?? undefined,
   supplier_id: (r.supplier_id as string) ?? undefined,
   active: Boolean(r.active),
-  created_at: r.created_at == null ? undefined : n(r.created_at),
-  updated_at: r.updated_at == null ? undefined : n(r.updated_at),
+  created_at: nOrU(r.created_at),
+  updated_at: nOrU(r.updated_at),
+  deleted_at: nOrU(r.deleted_at),
 })
 
 const rowToTx = (r: Record<string, unknown>): Transaction => ({
@@ -100,6 +114,8 @@ const rowToSupplier = (r: Record<string, unknown>): Supplier => ({
   name: String(r.name ?? ''),
   contact: (r.contact as string) ?? undefined,
   note: (r.note as string) ?? undefined,
+  updated_at: nOrU(r.updated_at),
+  deleted_at: nOrU(r.deleted_at),
 })
 
 /* ------------------------------------------------------------------ */
@@ -115,120 +131,47 @@ async function upsertChunked(table: string, rows: Record<string, unknown>[]): Pr
   }
 }
 
-/**
- * Pushes everything that changed since the last successful sync.
- *
- * Ledger rows are append-only, so "changed" is almost always "new" — cheap. The one exception
- * is a void, which flips `voided` on an OLD row while writing a NEW reversal row. That old row
- * is older than the watermark and would otherwise never be re-pushed, leaving the cloud copy
- * showing a sale the shop cancelled. So any row a new reversal points at is dragged along too.
- */
-export async function pushChanges(): Promise<{ pushed: number }> {
-  if (!supabase) return { pushed: 0 }
-  const session = await currentSession()
-  if (!session) {
-    setState({ phase: 'signed-out', email: null })
-    return { pushed: 0 }
-  }
-  if (!navigator.onLine) {
-    setState({ phase: 'offline' })
-    return { pushed: 0 }
-  }
-
-  const uid = session.user.id
+async function pushChanges(uid: string): Promise<number> {
   const started = Date.now()
-  const wm = Number(localStorage.getItem(WM_KEY(uid)) ?? 0)
+  const wm = Number(localStorage.getItem(PUSH_KEY(uid)) ?? 0)
+  const local = await snapshotForSync()
 
-  setState({ phase: 'syncing', error: null, email: session.user.email ?? null })
+  const products = local.products.filter((p) => (p.updated_at ?? 0) >= wm)
+  const suppliers = local.suppliers.filter((s) => (s.updated_at ?? 0) >= wm)
 
-  try {
-    const local = await exportBackup()
+  // A void flips `voided` on an OLD row while writing a NEW reversal row. The old row sits
+  // behind the watermark and would never be re-sent, leaving the other devices showing a sale
+  // this one cancelled — so drag along whatever a new reversal points at.
+  const fresh = local.transactions.filter((t) => t.ts >= wm)
+  const voidedIds = new Set(fresh.filter((t) => t.reversal_of).map((t) => t.reversal_of!))
+  const revived = local.transactions.filter((t) => voidedIds.has(t.id) && t.ts < wm)
+  const txs = [...fresh, ...revived]
 
-    // A brand-new device — or one whose browser data was just wiped — has nothing worth
-    // backing up. Pushing from here would replicate the emptiness upward and reconcile the
-    // cloud copy away, destroying the backup at the exact moment it's needed. Never push an
-    // empty device; offer a restore instead.
-    if (!local.products.length && !local.transactions.length) {
-      const remote = await cloudCounts()
-      const hasCloudData = Boolean(remote && (remote.products || remote.transactions))
-      setState({
-        phase: 'idle',
-        needsRestore: hasCloudData,
-        email: session.user.email ?? null,
-        error: null,
-      })
-      return { pushed: 0 }
-    }
+  // `current_stock` is deliberately not sent: it is this device's cache of the ledger, and
+  // every device derives its own from the rows it has.
+  await upsertChunked('products', products.map(({ current_stock: _s, ...p }) => ({ ...p, user_id: uid })))
+  await upsertChunked('transactions', txs.map((t) => ({ ...t, user_id: uid })))
+  await upsertChunked('suppliers', suppliers.map((s) => ({ ...s, user_id: uid })))
 
-    const products = local.products.filter((p) => (p.updated_at ?? 0) >= wm)
-
-    const fresh = local.transactions.filter((t) => t.ts >= wm)
-    const voidedIds = new Set(fresh.filter((t) => t.reversal_of).map((t) => t.reversal_of!))
-    const revived = local.transactions.filter((t) => voidedIds.has(t.id) && t.ts < wm)
-    const txs = [...fresh, ...revived]
-
-    await upsertChunked('products', products.map((p) => ({ ...p, user_id: uid })))
-    await upsertChunked('transactions', txs.map((t) => ({ ...t, user_id: uid })))
-    // Suppliers have no timestamps and there are only ever a handful — just push them all.
-    await upsertChunked('suppliers', local.suppliers.map((s) => ({ ...s, user_id: uid })))
-
-    // A product deleted locally must not come back from the dead on the next restore. The
-    // ledger is never deleted from, so only these two small tables need reconciling.
-    await reconcileDeletes('products', uid, local.products.map((p) => p.id))
-    await reconcileDeletes('suppliers', uid, local.suppliers.map((s) => s.id))
-
-    localStorage.setItem(WM_KEY(uid), String(started - OVERLAP_MS))
-    localStorage.setItem(LAST_KEY(uid), String(started))
-    setState({ phase: 'idle', lastSyncedAt: started, error: null, needsRestore: false })
-    return { pushed: products.length + txs.length }
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : 'Sinxronlash xatoligi'
-    setState({ phase: navigator.onLine ? 'error' : 'offline', error: msg })
-    throw new Error(msg)
-  }
-}
-
-/**
- * Deletes remote rows the shop no longer has locally, so a deleted product doesn't come back
- * from the dead on the next restore.
- *
- * The empty-local case is deliberately refused rather than obeyed. "Delete everything in the
- * cloud" is never a legitimate thing for a sync to conclude on its own — it is what an empty
- * or half-initialised device looks like, and obeying it would shred the backup. The caller
- * already guards this; the check is repeated here because the cost of being wrong is the
- * shop's entire history, and a future caller won't know that.
- */
-async function reconcileDeletes(table: string, uid: string, localIds: string[]): Promise<void> {
-  if (!localIds.length) return
-
-  const { data, error } = await supabase!.from(table).select('id').eq('user_id', uid)
-  if (error) throw new Error(`${table}: ${error.message}`)
-
-  const keep = new Set(localIds)
-  const stale = (data ?? []).map((r) => String(r.id)).filter((id) => !keep.has(id))
-  if (!stale.length) return
-
-  for (let i = 0; i < stale.length; i += CHUNK) {
-    const { error: delErr } = await supabase!
-      .from(table)
-      .delete()
-      .eq('user_id', uid)
-      .in('id', stale.slice(i, i + CHUNK))
-    if (delErr) throw new Error(`${table}: ${delErr.message}`)
-  }
+  localStorage.setItem(PUSH_KEY(uid), String(started - OVERLAP_MS))
+  return products.length + txs.length + suppliers.length
 }
 
 /* ------------------------------------------------------------------ */
-/* Pull (restore)                                                      */
+/* Pull                                                                */
 /* ------------------------------------------------------------------ */
 
-async function fetchAll(table: string, uid: string): Promise<Record<string, unknown>[]> {
+async function fetchSince(
+  table: string, uid: string, column: string, since: number,
+): Promise<Record<string, unknown>[]> {
   const out: Record<string, unknown>[] = []
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await supabase!
       .from(table)
       .select('*')
       .eq('user_id', uid)
+      .gte(column, since)
+      .order(column, { ascending: true })
       .range(from, from + PAGE - 1)
     if (error) throw new Error(`${table}: ${error.message}`)
     const rows = data ?? []
@@ -237,58 +180,89 @@ async function fetchAll(table: string, uid: string): Promise<Record<string, unkn
   }
 }
 
-/**
- * Pulls the cloud copy down and REPLACES local data with it. This is the "my laptop died"
- * path — destructive by design, so the caller must confirm first.
- */
-export async function pullFromCloud(): Promise<{ products: number; transactions: number }> {
-  if (!supabase) throw new Error('Bulut sozlanmagan')
-  const session = await currentSession()
-  if (!session) throw new Error('Avval hisobingizga kiring')
+async function pullChanges(uid: string): Promise<number> {
+  const started = Date.now()
+  const wm = Number(localStorage.getItem(PULL_KEY(uid)) ?? 0)
 
+  const [p, t, s] = await Promise.all([
+    fetchSince('products', uid, 'updated_at', wm),
+    fetchSince('transactions', uid, 'ts', wm),
+    fetchSince('suppliers', uid, 'updated_at', wm),
+  ])
+
+  // A void updates an OLD ledger row in place; its `ts` never moves, so a ts-based pull would
+  // never see it. Fetch anything flagged voided so the cancellation reaches this device too.
+  const { data: voided, error } = await supabase!
+    .from('transactions').select('*').eq('user_id', uid).eq('voided', true)
+  if (error) throw new Error(`transactions: ${error.message}`)
+
+  const changed = await mergeRemote({
+    products: p.map(rowToProduct),
+    transactions: [...t, ...(voided ?? [])].map(rowToTx),
+    suppliers: s.map(rowToSupplier),
+  })
+
+  localStorage.setItem(PULL_KEY(uid), String(started - OVERLAP_MS))
+  return changed
+}
+
+/* ------------------------------------------------------------------ */
+/* The sync cycle                                                      */
+/* ------------------------------------------------------------------ */
+
+let running = false
+let again = false
+
+export async function syncNow(): Promise<{ pushed: number; pulled: number }> {
+  if (!supabase) return { pushed: 0, pulled: 0 }
+
+  const session = await currentSession()
+  if (!session) {
+    setState({ phase: 'signed-out', email: null })
+    return { pushed: 0, pulled: 0 }
+  }
+  if (!navigator.onLine) {
+    setState({ phase: 'offline' })
+    return { pushed: 0, pulled: 0 }
+  }
+  // One cycle at a time: two overlapping cycles would race on the watermarks.
+  if (running) {
+    again = true
+    return { pushed: 0, pulled: 0 }
+  }
+
+  running = true
   const uid = session.user.id
-  setState({ phase: 'syncing', error: null })
+  setState({ phase: 'syncing', error: null, email: session.user.email ?? null })
 
   try {
-    const [p, t, s] = await Promise.all([
-      fetchAll('products', uid),
-      fetchAll('transactions', uid),
-      fetchAll('suppliers', uid),
-    ])
+    // Push first: our rows must be up there before we pull, or a pull that arrives between
+    // the two would look like the truth and our unsent sale would sit unseen for a cycle.
+    const pushed = await pushChanges(uid)
+    const pulled = await pullChanges(uid)
 
-    const res = await restoreBackup({
-      format: 'tamaki-savdo',
-      version: 1,
-      exported_at: Date.now(),
-      products: p.map(rowToProduct),
-      transactions: t.map(rowToTx),
-      suppliers: s.map(rowToSupplier),
-    })
-
-    // Local now equals the cloud, so there is nothing to push back up.
     const now = Date.now()
-    localStorage.setItem(WM_KEY(uid), String(now - OVERLAP_MS))
     localStorage.setItem(LAST_KEY(uid), String(now))
-    setState({ phase: 'idle', lastSyncedAt: now, error: null, needsRestore: false })
-    return res
+    setState({ phase: 'idle', lastSyncedAt: now, error: null, oversold: await findOversold() })
+    return { pushed, pulled }
   } catch (e) {
-    const msg = e instanceof Error ? e.message : 'Tiklashda xatolik'
-    setState({ phase: 'error', error: msg })
+    const msg = e instanceof Error ? e.message : 'Sinxronlash xatoligi'
+    setState({ phase: navigator.onLine ? 'error' : 'offline', error: msg })
     throw new Error(msg)
+  } finally {
+    running = false
+    if (again) { again = false; void syncNow().catch(() => {}) }
   }
 }
 
-/** How many rows the cloud is holding, without touching local data. */
-export async function cloudCounts(): Promise<{ products: number; transactions: number } | null> {
-  if (!supabase) return null
-  const session = await currentSession()
-  if (!session) return null
-
-  const [p, t] = await Promise.all([
-    supabase.from('products').select('*', { count: 'exact', head: true }).eq('user_id', session.user.id),
-    supabase.from('transactions').select('*', { count: 'exact', head: true }).eq('user_id', session.user.id),
-  ])
-  return { products: p.count ?? 0, transactions: t.count ?? 0 }
+/**
+ * Negative stock means two devices sold the same packet while they couldn't see each other.
+ * The ledger is still correct — it faithfully records both sales — but the shelf disagrees,
+ * so this must be shown to a human rather than quietly clamped to zero.
+ */
+async function findOversold(): Promise<string[]> {
+  const { products } = await snapshotForSync()
+  return products.filter((p) => !p.deleted_at && p.current_stock < 0).map((p) => p.name)
 }
 
 /* ------------------------------------------------------------------ */
@@ -298,13 +272,12 @@ export async function cloudCounts(): Promise<{ products: number; transactions: n
 let timer: ReturnType<typeof setTimeout> | null = null
 let started = false
 
-/** Coalesce a burst of writes (a 12-line basket) into one push. */
-function schedulePush(delay = 3000) {
+function schedule(delay = 2000) {
   if (timer) clearTimeout(timer)
   timer = setTimeout(() => {
     timer = null
-    void pushChanges().catch(() => {
-      /* already reflected in state; the next write or reconnect retries */
+    void syncNow().catch(() => {
+      /* reflected in state; the next write, tick, or reconnect retries */
     })
   }, delay)
 }
@@ -313,22 +286,38 @@ export function startAutoSync(): () => void {
   if (!supabase || started) return () => {}
   started = true
 
-  void currentSession().then((s) => {
-    if (!s) return setState({ phase: 'signed-out' })
-    const last = Number(localStorage.getItem(LAST_KEY(s.user.id)) ?? 0) || null
-    setState({ phase: 'idle', email: s.user.email ?? null, lastSyncedAt: last })
-    schedulePush(1500)
-  })
+  const boot = (uid: string | null, email: string | null) => {
+    if (!uid) return setState({ phase: 'signed-out', email: null, lastSyncedAt: null, oversold: [] })
+    setState({
+      phase: 'idle',
+      email,
+      lastSyncedAt: Number(localStorage.getItem(LAST_KEY(uid)) ?? 0) || null,
+    })
+    schedule(500)
+  }
 
-  const offAuth = supabase.auth.onAuthStateChange((_e, s) => {
-    if (!s) return setState({ phase: 'signed-out', email: null, lastSyncedAt: null, needsRestore: false })
-    const last = Number(localStorage.getItem(LAST_KEY(s.user.id)) ?? 0) || null
-    setState({ phase: 'idle', email: s.user.email ?? null, lastSyncedAt: last })
-    schedulePush(500)
-  })
+  void currentSession().then((s) => boot(s?.user.id ?? null, s?.user.email ?? null))
 
-  const offDb = subscribe(() => schedulePush())
-  const onOnline = () => schedulePush(500)
+  const offAuth = supabase.auth.onAuthStateChange((_e, s) =>
+    boot(s?.user.id ?? null, s?.user.email ?? null),
+  )
+
+  // Push whatever this device just wrote.
+  const offDb = subscribe(() => schedule())
+
+  // Pull whatever the other devices just wrote, the moment they write it.
+  const channel = supabase
+    .channel('shop-sync')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'transactions' }, () => schedule(300))
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => schedule(300))
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'suppliers' }, () => schedule(300))
+    .subscribe()
+
+  // Realtime can drop a message on a flaky shop connection, so a slow heartbeat backs it up:
+  // worst case the other till's sale shows up a minute late, rather than never.
+  const beat = setInterval(() => schedule(0), 60_000)
+
+  const onOnline = () => schedule(300)
   const onOffline = () => setState({ phase: 'offline' })
   window.addEventListener('online', onOnline)
   window.addEventListener('offline', onOffline)
@@ -337,8 +326,10 @@ export function startAutoSync(): () => void {
   return () => {
     started = false
     if (timer) clearTimeout(timer)
+    clearInterval(beat)
     offAuth.data.subscription.unsubscribe()
     offDb()
+    void supabase?.removeChannel(channel)
     window.removeEventListener('online', onOnline)
     window.removeEventListener('offline', onOffline)
   }

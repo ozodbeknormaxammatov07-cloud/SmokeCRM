@@ -1,38 +1,32 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../store'
 import { cloudConfigured, signIn, signUp, signOut } from '../lib/supabase'
-import { onSyncState, pushChanges, pullFromCloud, cloudCounts, type SyncState } from '../lib/sync'
-import { num, dateTimeLabel } from '../lib/format'
+import { onSyncState, syncNow, type SyncState } from '../lib/sync'
+import { dateTimeLabel } from '../lib/format'
 
-const PHASE_LABEL: Record<SyncState['phase'], { text: string; cls: string }> = {
-  off:          { text: 'Bulut sozlanmagan',   cls: 'bg-ink-100 text-ink-500' },
-  'signed-out': { text: 'Kirilmagan',          cls: 'bg-amber-50 text-amber-700' },
-  idle:         { text: 'Saqlangan',           cls: 'bg-emerald-50 text-emerald-700' },
-  syncing:      { text: 'Saqlanmoqda…',        cls: 'bg-blue-50 text-blue-700' },
-  offline:      { text: 'Internet yo‘q',       cls: 'bg-amber-50 text-amber-700' },
-  error:        { text: 'Xatolik',             cls: 'bg-red-50 text-red-700' },
+const PHASE: Record<SyncState['phase'], { text: string; cls: string }> = {
+  off:          { text: 'Sinxronlash sozlanmagan', cls: 'bg-ink-100 text-ink-500' },
+  'signed-out': { text: 'Kirilmagan',              cls: 'bg-amber-50 text-amber-700' },
+  idle:         { text: 'Sinxronlangan',           cls: 'bg-emerald-50 text-emerald-700' },
+  syncing:      { text: 'Sinxronlanmoqda…',        cls: 'bg-blue-50 text-blue-700' },
+  offline:      { text: 'Internet yo‘q',           cls: 'bg-amber-50 text-amber-700' },
+  error:        { text: 'Xatolik',                 cls: 'bg-red-50 text-red-700' },
 }
 
 export default function CloudBackup() {
   const { toast } = useStore()
   const [s, setS] = useState<SyncState>({
-    phase: 'off', lastSyncedAt: null, error: null, email: null, needsRestore: false,
+    phase: 'off', lastSyncedAt: null, error: null, email: null, oversold: [],
   })
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
-  const [counts, setCounts] = useState<{ products: number; transactions: number } | null>(null)
 
   useEffect(() => onSyncState(setS), [])
-
-  useEffect(() => {
-    if (s.phase === 'idle') void cloudCounts().then(setCounts).catch(() => {})
-  }, [s.phase, s.lastSyncedAt])
 
   if (!cloudConfigured) return null
 
   const signedIn = s.phase !== 'signed-out' && s.phase !== 'off'
-  const badge = PHASE_LABEL[s.phase]
 
   const doAuth = async (mode: 'in' | 'up') => {
     if (!email.trim() || !password) return toast('Email va parolni kiriting', 'err')
@@ -42,10 +36,10 @@ export default function CloudBackup() {
         const { needsConfirmation } = await signUp(email.trim(), password)
         toast(needsConfirmation
           ? 'Emailingizga tasdiqlash xati yuborildi — havolani bosing'
-          : "Hisob yaratildi — ma'lumotlar bulutga saqlanadi")
+          : "Do'kon hisobi yaratildi — endi hamma qurilma bir xil ma'lumotni ko'radi")
       } else {
         await signIn(email.trim(), password)
-        toast('Kirdingiz — bulutga saqlash yoqildi')
+        toast('Kirdingiz — sinxronlash yoqildi')
       }
       setPassword('')
     } catch (e) {
@@ -55,63 +49,59 @@ export default function CloudBackup() {
     }
   }
 
-  const doPush = async () => {
+  const doSync = async () => {
     setBusy(true)
     try {
-      const { pushed } = await pushChanges()
-      toast(pushed ? `Bulutga saqlandi — ${num(pushed)} ta yozuv` : "Hammasi allaqachon saqlangan")
+      const { pushed, pulled } = await syncNow()
+      toast(
+        pushed || pulled
+          ? `Sinxronlandi — ${pushed} ta yuborildi, ${pulled} ta qabul qilindi`
+          : 'Hammasi allaqachon bir xil',
+      )
     } catch (e) {
       toast(e instanceof Error ? e.message : 'Xatolik', 'err')
     } finally {
       setBusy(false)
     }
-  }
-
-  const doPull = async () => {
-    if (!confirm(
-      `DIQQAT: shu brauzerdagi hamma ma'lumot o'chiriladi va bulutdagi nusxa bilan ` +
-      `almashtiriladi.\n\nBu faqat yangi qurilmada yoki ma'lumot yo'qolganda kerak.\n\nDavom etilsinmi?`,
-    )) return
-    setBusy(true)
-    try {
-      const r = await pullFromCloud()
-      toast(`Bulutdan tiklandi — ${num(r.products)} mahsulot, ${num(r.transactions)} yozuv`)
-    } catch (e) {
-      toast(e instanceof Error ? e.message : 'Xatolik', 'err')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const doSignOut = async () => {
-    await signOut()
-    toast("Chiqdingiz — ma'lumotlar shu brauzerda qoladi, lekin bulutga saqlanmaydi")
   }
 
   return (
     <section className="card p-4 mt-4">
-      <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
-        <div>
-          <h2 className="font-semibold flex items-center gap-2">
-            ☁️ Bulutga zaxira
-            <span className={`chip ${badge.cls}`}>{badge.text}</span>
-          </h2>
-          <p className="text-xs text-ink-400 mt-1 max-w-lg">
-            Sotuv shu brauzerda saqlanadi va internetsiz ham ishlaydi. Bulut — nusxa:
-            noutbuk buzilsa yoki brauzer tozalansa, hammasini qaytarib olasiz.
-          </p>
-        </div>
+      <div className="mb-3">
+        <h2 className="font-semibold flex items-center gap-2">
+          ☁️ Sinxronlash
+          <span className={`chip ${PHASE[s.phase].cls}`}>{PHASE[s.phase].text}</span>
+        </h2>
+        <p className="text-xs text-ink-400 mt-1 max-w-xl">
+          Hamma qurilma bitta do'kon hisobiga kiradi va bir xil ma'lumotni ko'radi.
+          Sotuv avval shu qurilmada saqlanadi — internet yo'q bo'lsa ham ishlaydi —
+          keyin avtomatik yuboriladi.
+        </p>
       </div>
 
-      {s.error && (
-        <p className="text-xs text-red-600 font-semibold mb-3">{s.error}</p>
+      {s.error && <p className="text-xs text-red-600 font-semibold mb-3">{s.error}</p>}
+
+      {/* Two tills, both offline, both sold the last packet. The ledger is right; the shelf
+          isn't. Nothing can prevent this without demanding internet for every sale, so say it
+          out loud instead of quietly clamping to zero. */}
+      {!!s.oversold.length && (
+        <div className="mb-3 rounded-lg bg-red-50 border border-red-200 p-3">
+          <p className="text-sm font-semibold text-red-800">
+            Qoldiq manfiy: {s.oversold.join(', ')}
+          </p>
+          <p className="text-xs text-red-700 mt-1">
+            Ikki qurilma internetsiz bir vaqtda bir xil tovarni sotgan. Sotuvlar yozuvda
+            to'g'ri turibdi, lekin javondagi soni to'g'ri kelmayapti — qayta sanab,
+            "Qoldiqni tuzatish" orqali to'g'rilang.
+          </p>
+        </div>
       )}
 
       {!signedIn ? (
         <div className="rounded-lg border border-ink-200 p-3">
           <p className="text-sm text-ink-500 mb-3">
-            Bulutga saqlash uchun bitta hisob yarating. Shu hisob bilan boshqa qurilmada
-            ma'lumotni tiklaysiz — parolni yo'qotmang.
+            Do'kon uchun bitta hisob yarating va hamma xodim shu hisobga kirsin.
+            Kim sotgani har bir yozuvda alohida saqlanadi ("Xodim" nomi bo'yicha).
           </p>
           <div className="grid sm:grid-cols-2 gap-2">
             <div>
@@ -137,54 +127,36 @@ export default function CloudBackup() {
               {busy ? '…' : 'Kirish'}
             </button>
             <button className="btn-ghost" onClick={() => void doAuth('up')} disabled={busy}>
-              Yangi hisob yaratish
+              Yangi do'kon hisobi
             </button>
           </div>
         </div>
       ) : (
         <div className="rounded-lg border border-ink-200 p-3">
-          {s.needsRestore && (
-            <div className="mb-3 rounded-lg bg-amber-50 border border-amber-200 p-3">
-              <p className="text-sm font-semibold text-amber-900">
-                Bu qurilma bo'sh, lekin bulutda ma'lumot bor.
-              </p>
-              <p className="text-xs text-amber-800 mt-1">
-                Yangi qurilmada yoki brauzer tozalangandan keyin shunday bo'ladi.
-                Ishni boshlashdan oldin bulutdagi nusxani tiklang — aks holda ikki xil
-                ro'yxat paydo bo'ladi.
-              </p>
-              <button className="btn-primary mt-3" onClick={doPull} disabled={busy}>
-                ⬇ Bulutdan tiklash
-              </button>
-            </div>
-          )}
-
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="text-sm">
               <div className="font-semibold">{s.email}</div>
               <div className="text-xs text-ink-400">
-                {s.lastSyncedAt
-                  ? `oxirgi saqlash: ${dateTimeLabel(s.lastSyncedAt)}`
-                  : 'hali saqlanmagan'}
-                {counts && ` · bulutda ${num(counts.products)} mahsulot, ${num(counts.transactions)} yozuv`}
+                {s.lastSyncedAt ? `oxirgi sinxronlash: ${dateTimeLabel(s.lastSyncedAt)}` : 'hali sinxronlanmagan'}
               </div>
             </div>
-            <button className="text-xs font-semibold text-ink-400 hover:text-red-600" onClick={doSignOut}>
-              Chiqish
-            </button>
-          </div>
-
-          <div className="flex flex-wrap gap-2 mt-3">
-            <button className="btn-ghost" onClick={doPush} disabled={busy || s.phase === 'syncing'}>
-              ⬆ Hozir saqlash
-            </button>
-            <button className="btn-ghost text-red-600 hover:bg-red-50" onClick={doPull} disabled={busy}>
-              ⬇ Bulutdan tiklash
-            </button>
+            <div className="flex gap-2">
+              <button className="btn-ghost" onClick={doSync} disabled={busy || s.phase === 'syncing'}>
+                ⟳ Hozir sinxronlash
+              </button>
+              <button
+                className="text-xs font-semibold text-ink-400 hover:text-red-600"
+                onClick={async () => {
+                  await signOut()
+                  toast("Chiqdingiz — ma'lumot shu qurilmada qoladi, lekin sinxronlanmaydi")
+                }}
+              >
+                Chiqish
+              </button>
+            </div>
           </div>
           <p className="text-xs text-ink-400 mt-2">
-            Har bir sotuv avtomatik saqlanadi — tugmani faqat tekshirish uchun bosing.
-            "Tiklash" esa shu brauzerdagi ma'lumotni bulutdagisi bilan almashtiradi.
+            Avtomatik ishlaydi — tugmani faqat tekshirish uchun bosing.
           </p>
         </div>
       )}

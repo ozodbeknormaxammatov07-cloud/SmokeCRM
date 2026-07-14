@@ -1,12 +1,24 @@
--- Tamaki Savdo / SmokeCRM — cloud backup schema.
+-- Tamaki Savdo / SmokeCRM — multi-device sync schema.
 --
--- IndexedDB in the browser stays the SOURCE OF TRUTH. These tables are a replica whose only
--- job is to survive a dead laptop or a cleared browser. That is why there is no stock guard
--- and no business logic here: the till already enforces those atomically, offline, and this
--- schema must never become a second place where the rules live and drift out of sync.
+-- Every device commits sales to its own IndexedDB first, so the till keeps working with the
+-- wifi down. These tables are the meeting point: each device pushes what it wrote and pulls
+-- what the others wrote. There is no stock guard and no business logic here — the till already
+-- enforces that, and a second copy of the rules would drift out of step with the first.
 --
--- The ledger is append-only with UUID keys, so replication is a plain idempotent upsert —
--- pushing the same row twice is a no-op, which is exactly what makes retry-after-offline safe.
+-- All staff sign into the SAME shop account, so `user_id` identifies the shop, not the person.
+-- Who rang up a sale is recorded on the ledger row itself (`user_name`).
+--
+-- Two devices are safe to run at once because of the shape of the data, not because of locks:
+--
+--   * The ledger is append-only with UUID keys — a grow-only set. Two devices appending sales
+--     cannot overwrite each other, in any order, online or off. Merging is an idempotent
+--     upsert, which is also what makes retry-after-offline safe.
+--   * Stock is DERIVED from that ledger by each device, never stored here. A stored counter is
+--     a lost-update race: both devices read 10, both sell 3, one write wins, and the shop has
+--     sold 6 packets but decremented 3. A sum has no such race.
+--   * Deletes are TOMBSTONES (`deleted_at`), never row removals. "It's missing, so delete it"
+--     cannot tell a deletion apart from a row the other device just created — and guessing
+--     wrong destroys the other device's work.
 
 create extension if not exists pgcrypto;
 
@@ -36,9 +48,13 @@ create table if not exists public.products (
   active            boolean not null default true,
   created_at        bigint,
   updated_at        bigint,
+  deleted_at        bigint,   -- tombstone; the row stays so the deletion can replicate
   synced_at         timestamptz not null default now(),
   primary key (user_id, id)
 );
+
+-- Pulls are "everything changed since my watermark", so that is the access path.
+create index if not exists products_user_updated_idx on public.products (user_id, updated_at);
 
 create table if not exists public.transactions (
   user_id       uuid    not null references auth.users(id) on delete cascade,
@@ -67,14 +83,18 @@ create table if not exists public.transactions (
 create index if not exists transactions_user_ts_idx on public.transactions (user_id, ts desc);
 
 create table if not exists public.suppliers (
-  user_id   uuid not null references auth.users(id) on delete cascade,
-  id        text not null,
-  name      text not null,
-  contact   text,
-  note      text,
-  synced_at timestamptz not null default now(),
+  user_id    uuid not null references auth.users(id) on delete cascade,
+  id         text not null,
+  name       text not null,
+  contact    text,
+  note       text,
+  updated_at bigint,
+  deleted_at bigint,
+  synced_at  timestamptz not null default now(),
   primary key (user_id, id)
 );
+
+create index if not exists suppliers_user_updated_idx on public.suppliers (user_id, updated_at);
 
 -- ---------------------------------------------------------------------------
 -- Row-level security
@@ -161,3 +181,13 @@ revoke all on public.suppliers    from authenticated;
 grant select, insert, update, delete on public.products     to authenticated;
 grant select, insert, update, delete on public.transactions to authenticated;
 grant select, insert, update, delete on public.suppliers    to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Realtime
+-- ---------------------------------------------------------------------------
+-- Devices hear each other's writes instead of polling for them. Realtime honours RLS, so a
+-- device is only ever notified about its own shop's rows.
+
+alter publication supabase_realtime add table public.products;
+alter publication supabase_realtime add table public.transactions;
+alter publication supabase_realtime add table public.suppliers;
