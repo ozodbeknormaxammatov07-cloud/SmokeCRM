@@ -34,6 +34,10 @@ create extension if not exists pgcrypto;
 -- Timestamps are bigint epoch-milliseconds to match the app's `Date.now()` values exactly.
 -- Storing them as timestamptz would force a lossy conversion on every sync.
 
+-- NOTE: there is deliberately no `current_stock` column. Stock is DERIVED from the ledger by
+-- every device, so a stored counter here would be a second source of truth that immediately
+-- goes stale — and anyone reading this table directly would be misled by it. To see what the
+-- shelf actually holds, query the `stock_levels` view at the bottom of this file.
 create table if not exists public.products (
   user_id           uuid    not null references auth.users(id) on delete cascade,
   id                text    not null,
@@ -41,7 +45,6 @@ create table if not exists public.products (
   brand             text    not null default '',
   cost_price        numeric not null default 0,
   selling_price     numeric not null default 0,
-  current_stock     integer not null default 0,
   reorder_threshold integer not null default 0,
   barcode           text,
   supplier_id       text,
@@ -191,3 +194,28 @@ grant select, insert, update, delete on public.suppliers    to authenticated;
 alter publication supabase_realtime add table public.products;
 alter publication supabase_realtime add table public.transactions;
 alter publication supabase_realtime add table public.suppliers;
+
+-- ---------------------------------------------------------------------------
+-- stock_levels — what the shelf actually holds
+-- ---------------------------------------------------------------------------
+-- The app derives stock from the ledger; this gives anyone reading the database the same
+-- number, instead of leaving them to guess from a table that deliberately doesn't store it.
+--
+-- security_invoker = true is essential: a view runs as its OWNER by default, which would
+-- bypass RLS and let any signed-in user read every shop's stock.
+
+create or replace view public.stock_levels with (security_invoker = true) as
+  select
+    p.user_id,
+    p.id   as product_id,
+    p.name,
+    p.brand,
+    coalesce(sum(case when t.type = 'SALE' then -t.quantity else t.quantity end), 0) as current_stock
+  from public.products p
+  left join public.transactions t
+    on t.user_id = p.user_id and t.product_id = p.id
+  where p.deleted_at is null
+  group by p.user_id, p.id, p.name, p.brand;
+
+revoke all on public.stock_levels from anon;
+grant select on public.stock_levels to authenticated;
