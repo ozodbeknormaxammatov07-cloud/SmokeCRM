@@ -498,6 +498,31 @@ const BACKUP_STORES = [
 ]
 
 /**
+ * Wipes every business store on this device — products, the whole ledger, firms, orders,
+ * deliveries, payments — leaving staff accounts (the `users` store) untouched so the admin
+ * doing the reset stays signed in.
+ *
+ * Destructive and irreversible: callers MUST confirm first. Intended for "start a fresh test",
+ * so it deliberately does not export a backup first.
+ *
+ * Note on cloud sync: this clears only the LOCAL data. A device still signed into the shop's
+ * Supabase account will re-pull whatever is in the cloud on the next sync — so a true fresh
+ * start also means clearing the cloud (or signing out of it) first.
+ */
+export async function resetAllData(): Promise<void> {
+  await tx(BACKUP_STORES, 'readwrite', async (t) => {
+    for (const s of BACKUP_STORES) {
+      await new Promise<void>((res, rej) => {
+        const r = t.objectStore(s).clear()
+        r.onsuccess = () => res()
+        r.onerror = () => rej(r.error)
+      })
+    }
+  })
+  notify()
+}
+
+/**
  * Replaces everything with the contents of a backup file. Destructive by design —
  * this is the "my laptop died" path, so callers must confirm first.
  *

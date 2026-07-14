@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Link, Navigate, useParams } from 'react-router-dom'
+import { Link, Navigate, useParams, useNavigate } from 'react-router-dom'
 import { useStore } from '../store'
 import { Page, Empty } from '../components/ui'
 import FirmForm from '../components/FirmForm'
@@ -7,6 +7,7 @@ import PaymentForm from '../components/PaymentForm'
 import { money, dateLabel } from '../lib/format'
 import { statement, supplierBalance, unpaidDeliveries, forSupplier } from '../lib/payables'
 import { voidDelivery, voidPayment } from '../lib/procurement'
+import { deleteSupplier } from '../lib/db'
 
 /** One field of the bank block. Kept dumb, so the block reads as data rather than markup. */
 function Detail({ label, value }: { label: string; value?: string | number }) {
@@ -21,6 +22,7 @@ function Detail({ label, value }: { label: string; value?: string | number }) {
 
 export default function FirmDetail() {
   const { id = '' } = useParams()
+  const navigate = useNavigate()
   const { suppliers, deliveries, payments, actor, toast } = useStore()
   const [editing, setEditing] = useState(false)
   const [paying, setPaying] = useState(false)
@@ -56,6 +58,20 @@ export default function FirmDetail() {
     }
   }
 
+  const removeFirm = async () => {
+    const warn = balance > 0
+      ? `\n\nDiqqat: bu firmada ${money(balance)} qarz bor.`
+      : ''
+    if (!confirm(`"${firm.name}" o'chirilsinmi?${warn}\n\nYetkazib berish va to'lovlar tarixi saqlanib qoladi.`)) return
+    try {
+      await deleteSupplier(firm.id)
+      toast("Firma o'chirildi")
+      navigate('/firmalar')
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "O'chirib bo'lmadi", 'err')
+    }
+  }
+
   return (
     <Page
       title={firm.name}
@@ -63,6 +79,7 @@ export default function FirmDetail() {
       actions={
         <>
           <Link to="/firmalar" className="btn-ghost">← Firmalar</Link>
+          <button className="btn-ghost text-red-600 hover:bg-red-50" onClick={removeFirm}>O'chirish</button>
           <button className="btn-ghost" onClick={() => setEditing(true)}>Tahrirlash</button>
           <button className="btn-primary" onClick={() => setPaying(true)}>To'lov qilish</button>
         </>

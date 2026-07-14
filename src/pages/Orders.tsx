@@ -5,8 +5,8 @@ import { Page, Empty } from '../components/ui'
 import OrderForm from '../components/OrderForm'
 import { money, dateLabel } from '../lib/format'
 import { orderStatus, receivedQty, linesTotal, ORDER_STATUS_LABEL } from '../lib/payables'
-import { cancelPurchaseOrder } from '../lib/procurement'
-import type { OrderStatus } from '../lib/types'
+import { cancelPurchaseOrder, deletePurchaseOrder } from '../lib/procurement'
+import type { OrderStatus, PurchaseOrder } from '../lib/types'
 
 const TONE: Record<OrderStatus, string> = {
   waiting: 'bg-ink-100 text-ink-600',
@@ -19,6 +19,7 @@ const TONE: Record<OrderStatus, string> = {
 export default function Orders() {
   const { orders, deliveries, suppliers, toast } = useStore()
   const [adding, setAdding] = useState(false)
+  const [editing, setEditing] = useState<PurchaseOrder | null>(null)
 
   const rows = useMemo(
     () =>
@@ -36,6 +37,16 @@ export default function Orders() {
     try {
       await cancelPurchaseOrder(id)
       toast('Buyurtma bekor qilindi')
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Xatolik', 'err')
+    }
+  }
+
+  const remove = async (o: PurchaseOrder) => {
+    if (!confirm(`Buyurtma ${o.number} butunlay o'chirilsinmi?`)) return
+    try {
+      await deletePurchaseOrder(o.id)
+      toast("Buyurtma o'chirildi")
     } catch (e) {
       toast(e instanceof Error ? e.message : 'Xatolik', 'err')
     }
@@ -83,22 +94,40 @@ export default function Orders() {
 
                 <div className="text-right shrink-0">
                   <div className="font-bold num">{money(linesTotal(order.lines))}</div>
-                  {status !== 'received' && status !== 'cancelled' && (
-                    <div className="flex gap-2 mt-1 justify-end">
+                  <div className="flex flex-wrap gap-2 mt-1 justify-end">
+                    {status !== 'received' && status !== 'cancelled' && (
                       <Link
                         to={`/kirim?buyurtma=${order.id}`}
                         className="text-xs font-semibold text-ink-900 underline"
                       >
                         Qabul qilish
                       </Link>
+                    )}
+                    {/* Editing only makes sense before anything has arrived — once goods are
+                        received, the order's lines are the record of what was ordered. */}
+                    {(status === 'waiting' || status === 'overdue') && (
+                      <button
+                        onClick={() => setEditing(order)}
+                        className="text-xs font-semibold text-ink-500 hover:text-ink-900"
+                      >
+                        Tahrirlash
+                      </button>
+                    )}
+                    {status !== 'received' && status !== 'cancelled' && (
                       <button
                         onClick={() => cancel(order.id)}
-                        className="text-xs font-semibold text-ink-400 hover:text-red-600"
+                        className="text-xs font-semibold text-ink-400 hover:text-amber-700"
                       >
                         Bekor
                       </button>
-                    </div>
-                  )}
+                    )}
+                    <button
+                      onClick={() => remove(order)}
+                      className="text-xs font-semibold text-ink-400 hover:text-red-600"
+                    >
+                      O'chirish
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -127,6 +156,9 @@ export default function Orders() {
       )}
 
       <OrderForm open={adding} onClose={() => setAdding(false)} />
+      {editing && (
+        <OrderForm order={editing} open onClose={() => setEditing(null)} />
+      )}
     </Page>
   )
 }
