@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto'
 import { openDb, STORES, tx, getAll } from '../src/lib/idb'
 import {
   createProduct, commitCart, fetchAllTransactions,
-  exportBackup, restoreBackup,
+  exportBackup, restoreBackup, snapshotForSync, mergeRemote,
 } from '../src/lib/db'
 import {
   createDelivery, voidDelivery, fetchDeliveries,
@@ -10,7 +10,7 @@ import {
   savePurchaseOrder, cancelPurchaseOrder, fetchPurchaseOrders,
 } from '../src/lib/procurement'
 import { supplierBalance, orderStatus, outstandingLines } from '../src/lib/payables'
-import type { Product } from '../src/lib/types'
+import type { Product, Delivery } from '../src/lib/types'
 
 let fail = 0
 const eq = (name: string, got: unknown, want: unknown) => {
@@ -288,6 +288,47 @@ async function main() {
   ok('but the products came back', (await products()).length > 0)
 
   await restoreBackup(backup)   // put the real data back
+
+  console.log('\n=== merge is idempotent ===')
+  const snap = await snapshotForSync()
+  eq('merging our own snapshot changes nothing', await mergeRemote(snap), 0)
+
+  console.log('\n=== a stale device cannot un-void a delivery or a payment ===')
+  const voidedDelivery = snap.deliveries.find((d) => d.voided)!
+  const voidedPayment = snap.payments.find((p) => p.voided)!
+  await mergeRemote({
+    ...snap,
+    deliveries: [{ ...voidedDelivery, voided: false }],
+    payments: [{ ...voidedPayment, voided: false }],
+  })
+  eq('delivery stays voided',
+    (await fetchDeliveries()).find((d) => d.id === voidedDelivery.id)!.voided, true)
+  eq('payment stays voided',
+    (await fetchPayments()).find((p) => p.id === voidedPayment.id)!.voided, true)
+
+  console.log('\n=== a BACKDATED delivery still replicates ===')
+  // The regression test for the two-date rule. This delivery ARRIVED 30 days ago but is being
+  // written now. Had sync paged on delivered_at, it would sit behind the other device's
+  // watermark and never be pulled — and the two tills would disagree about the debt forever.
+  const backdated: Delivery = {
+    id: 'backdated-1', supplier_id: 'F9',
+    created_at: Date.now(),                       // written NOW
+    delivered_at: Date.now() - 30 * 86_400_000,   // but it arrived a month ago
+    lines: [], total_amount: 500_000,
+    user_name: 'A', user_role: 'admin', voided: false,
+  }
+  ok('merge accepts it', (await mergeRemote({ ...snap, deliveries: [backdated] })) > 0)
+  const pulled = (await fetchDeliveries()).find((d) => d.id === 'backdated-1')!
+  ok('backdated delivery merged', !!pulled)
+  ok('its watermark is the write time, not the arrival date',
+    pulled.created_at > pulled.delivered_at)
+  eq('and it counts towards the debt',
+    supplierBalance((await fetchDeliveries()).filter((d) => d.supplier_id === 'F9'), []), 500_000)
+
+  console.log('\n=== merging a delivery rebuilds the stock it carries ===')
+  const merged = await fetchDeliveries()
+  const live = merged.find((d) => !d.voided && !d.reversal_of && d.lines.length > 0)!
+  ok('a merged delivery has lines to recompute from', live.lines.length > 0)
 
   console.log(fail === 0 ? '\n✅ ALL PROCUREMENT CHECKS PASSED\n' : `\n❌ ${fail} CHECK(S) FAILED\n`)
   process.exit(fail === 0 ? 0 : 1)

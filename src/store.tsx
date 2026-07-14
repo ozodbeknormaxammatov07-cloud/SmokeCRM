@@ -9,6 +9,7 @@ import {
 } from 'react'
 import { initDb, watchProducts, watchRecentTransactions, watchSuppliers } from './lib/db'
 import { watchDeliveries, watchPayments, watchPurchaseOrders } from './lib/procurement'
+import { startAutoSync } from './lib/sync'
 import { hasAnyAccount, getAccount, login as authLogin, createAccount } from './lib/auth'
 import type {
   Product, Transaction, Supplier, Role, Delivery, Payment, PurchaseOrder, Account,
@@ -107,6 +108,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           watchDeliveries(setDeliveries),
           watchPayments(setPayments),
           watchPurchaseOrders(setOrders),
+          // Cloud sync: pushes local writes to Supabase and pulls other devices' writes. If no
+          // Supabase account is signed in (or the network is down) it's a no-op and the till
+          // keeps working entirely on the local database.
+          startAutoSync(),
         ]
 
         // Resolve who is signed in, if anyone. A stored session id that no longer maps to a
