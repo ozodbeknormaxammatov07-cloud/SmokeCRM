@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useStore } from '../store'
 import {
   watchTransactions, voidTransaction, fetchAllTransactions, exportBackup, restoreBackup,
-  type Backup,
+  resetAllData, type Backup,
 } from '../lib/db'
 import { totals, timeSeries, byBrand, byProduct, type Grain } from '../lib/analytics'
 import { exportReport, exportTransactions } from '../lib/excel'
@@ -249,7 +249,79 @@ export default function Reports() {
       </div>
 
       <CloudBackup />
+      <DangerZone />
     </Page>
+  )
+}
+
+/**
+ * Wipes all business data on this device, behind a typed confirmation. The typed word is what
+ * stops a mis-tap from erasing the shop — a single "are you sure?" is too easy to click through.
+ */
+function DangerZone() {
+  const { toast } = useStore()
+  const [confirming, setConfirming] = useState(false)
+  const [word, setWord] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const reset = async () => {
+    setBusy(true)
+    try {
+      await resetAllData()
+      toast("Barcha ma'lumot tozalandi")
+      setConfirming(false)
+      setWord('')
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Xatolik', 'err')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="card p-4 mt-4 border-red-200">
+      <h2 className="font-semibold text-red-700">Ma'lumotni tozalash</h2>
+      <p className="text-sm text-ink-500 mt-1">
+        Bu qurilmadagi barcha mahsulot, sotuv, firma, buyurtma va to'lovlarni o'chiradi. Xodim
+        hisoblari saqlanadi. Orqaga qaytarib bo'lmaydi — avval zaxira (Excel) oling.
+      </p>
+      <p className="text-xs text-ink-400 mt-1">
+        Eslatma: agar qurilma bulutga (Sinxronlash) ulangan bo'lsa, keyingi sinxronlashda bulutdagi
+        ma'lumot qaytadan yuklanadi.
+      </p>
+
+      {!confirming ? (
+        <button
+          className="btn bg-red-600 text-white hover:bg-red-700 mt-3"
+          onClick={() => setConfirming(true)}
+        >
+          Barcha ma'lumotni tozalash
+        </button>
+      ) : (
+        <div className="mt-3 space-y-2">
+          <label className="label">Tasdiqlash uchun "TOZALASH" deb yozing</label>
+          <input
+            className="field"
+            value={word}
+            onChange={(e) => setWord(e.target.value)}
+            placeholder="TOZALASH"
+            autoFocus
+          />
+          <div className="flex gap-2">
+            <button className="btn-ghost" onClick={() => { setConfirming(false); setWord('') }}>
+              Bekor
+            </button>
+            <button
+              className="btn bg-red-600 text-white hover:bg-red-700 disabled:opacity-40"
+              onClick={reset}
+              disabled={busy || word.trim().toUpperCase() !== 'TOZALASH'}
+            >
+              {busy ? 'Tozalanmoqda…' : "Ha, hammasini o'chir"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 

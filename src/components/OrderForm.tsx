@@ -4,15 +4,22 @@ import { savePurchaseOrder } from '../lib/procurement'
 import { linesTotal } from '../lib/payables'
 import { Modal } from './ui'
 import { money, parseNum, isoDay, startOfDay } from '../lib/format'
-import type { OrderLine } from '../lib/types'
+import type { OrderLine, PurchaseOrder } from '../lib/types'
 
 const WEEK = 7 * 86_400_000
 
-export default function OrderForm({ open, onClose }: { open: boolean; onClose: () => void }) {
+/** `order` prefills the form to edit an existing order; omit it to create a new one. */
+export default function OrderForm({ order, open, onClose }: {
+  order?: PurchaseOrder
+  open: boolean
+  onClose: () => void
+}) {
   const { suppliers, products, actor, toast } = useStore()
-  const [firmId, setFirmId] = useState('')
-  const [expected, setExpected] = useState(isoDay(Date.now() + WEEK))
-  const [lines, setLines] = useState<OrderLine[]>([])
+  const [firmId, setFirmId] = useState(order?.supplier_id ?? '')
+  const [expected, setExpected] = useState(
+    isoDay(order?.expected_at ?? Date.now() + WEEK),
+  )
+  const [lines, setLines] = useState<OrderLine[]>(order?.lines ?? [])
   const [q, setQ] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -58,14 +65,20 @@ export default function OrderForm({ open, onClose }: { open: boolean; onClose: (
     setBusy(true)
     try {
       await savePurchaseOrder({
+        // Passing the id (when editing) keeps the same order and its number; omitting it mints
+        // a new one. ordered_at is preserved on edit so the order keeps its original date.
+        id: order?.id,
+        number: order?.number,
         supplier_id: firmId,
-        ordered_at: Date.now(),
+        ordered_at: order?.ordered_at ?? Date.now(),
         expected_at: expected ? startOfDay(expected) : undefined,
         lines,
       }, actor)
-      toast('Buyurtma saqlandi')
-      setLines([])
-      setFirmId('')
+      toast(order ? 'Buyurtma yangilandi' : 'Buyurtma saqlandi')
+      if (!order) {
+        setLines([])
+        setFirmId('')
+      }
       setQ('')
       onClose()
     } catch (e) {
@@ -76,7 +89,7 @@ export default function OrderForm({ open, onClose }: { open: boolean; onClose: (
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Yangi buyurtma" wide>
+    <Modal open={open} onClose={onClose} title={order ? 'Buyurtmani tahrirlash' : 'Yangi buyurtma'} wide>
       <p className="text-sm text-ink-500 mb-4">
         Buyurtma — bu niyat. Qoldiq ham, qarz ham o'zgarmaydi: tovar kelganda Kirim bo'limida
         qabul qilasiz.

@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto'
 import {
   createProduct, updateProduct, commitCart, voidTransaction, adjustStock,
-  fetchAllTransactions, importProducts, exportBackup, restoreBackup, StockError,
+  fetchAllTransactions, importProducts, exportBackup, restoreBackup, resetAllData, StockError,
 } from '../src/lib/db'
 import { tx, STORES, getAll } from '../src/lib/idb'
 import { totals } from '../src/lib/analytics'
@@ -160,6 +160,17 @@ async function main() {
   let bad: unknown = null
   try { await restoreBackup({ nope: true } as never) } catch (e) { bad = e }
   ok('garbage backup file refused', bad instanceof Error)
+
+  console.log('\n=== resetAllData wipes the business stores ===')
+  ok('there is data to wipe', (await fetchAllTransactions()).length > 0 && (await products()).length > 0)
+  await resetAllData()
+  eq('products cleared', (await products()).length, 0)
+  eq('transactions cleared', (await fetchAllTransactions()).length, 0)
+  const empty = await exportBackup()
+  eq('every business store is empty',
+    [empty.products.length, empty.transactions.length, empty.suppliers.length,
+      empty.purchase_orders.length, empty.deliveries.length, empty.payments.length],
+    [0, 0, 0, 0, 0, 0])
 
   console.log(fail === 0 ? '\n✅ ALL DB CHECKS PASSED\n' : `\n❌ ${fail} CHECK(S) FAILED\n`)
   process.exit(fail === 0 ? 0 : 1)
