@@ -7,12 +7,15 @@
  */
 
 export const DB_NAME = 'tamaki-savdo'
-const DB_VERSION = 1
+const DB_VERSION = 2
 
 export const STORES = {
   products: 'products',
   transactions: 'transactions',
   suppliers: 'suppliers',
+  purchase_orders: 'purchase_orders',
+  deliveries: 'deliveries',
+  payments: 'payments',
 } as const
 
 export type StoreName = (typeof STORES)[keyof typeof STORES]
@@ -39,6 +42,26 @@ export function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORES.suppliers)) {
         db.createObjectStore(STORES.suppliers, { keyPath: 'id' })
+      }
+
+      // v2 — procurement. An existing database keeps every row it already holds: this handler
+      // runs for the version delta only, and each block is guarded by a `contains` check.
+      if (!db.objectStoreNames.contains(STORES.purchase_orders)) {
+        const s = db.createObjectStore(STORES.purchase_orders, { keyPath: 'id' })
+        s.createIndex('supplier_id', 'supplier_id')
+        s.createIndex('updated_at', 'updated_at')
+      }
+      if (!db.objectStoreNames.contains(STORES.deliveries)) {
+        const s = db.createObjectStore(STORES.deliveries, { keyPath: 'id' })
+        s.createIndex('supplier_id', 'supplier_id')
+        // Indexed on created_at, NOT delivered_at: sync pages on the write time, so that a
+        // delivery typed in today for goods that arrived last week still replicates.
+        s.createIndex('created_at', 'created_at')
+      }
+      if (!db.objectStoreNames.contains(STORES.payments)) {
+        const s = db.createObjectStore(STORES.payments, { keyPath: 'id' })
+        s.createIndex('supplier_id', 'supplier_id')
+        s.createIndex('created_at', 'created_at')
       }
     }
 

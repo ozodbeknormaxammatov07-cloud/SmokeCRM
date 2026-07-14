@@ -60,13 +60,118 @@ export interface Transaction {
   reversal_of?: string
 }
 
+/**
+ * A firm we buy from. `contact` remains the phone number (it already was one); everything
+ * added here is what you need in order to actually transfer money to them.
+ */
 export interface Supplier {
   id: string
   name: string
   contact?: string
   note?: string
+  /** STIR — tax identification number. */
+  inn?: string
+  /** Hisob raqam — settlement account. */
+  bank_account?: string
+  bank_name?: string
+  /** MFO — bank routing code. */
+  bank_mfo?: string
+  address?: string
+  director?: string
+  /** Days of credit the firm grants us. Drives the overdue calculation. */
+  payment_terms_days?: number
   updated_at?: number
   deleted_at?: number
+}
+
+export type PaymentMethod = 'cash' | 'bank' | 'card' | 'other'
+
+/** Derived from the deliveries — except `cancelled`, which is a human decision. */
+export type OrderStatus = 'waiting' | 'partial' | 'received' | 'overdue' | 'cancelled'
+
+/** One product line on an order or a delivery. Shared shape — they line up 1:1 by design. */
+export interface OrderLine {
+  product_id: string
+  product_name: string
+  brand: string
+  quantity: number
+  unit_cost: number
+}
+
+/**
+ * An intention, not money. Placing an order moves NOTHING — no stock, no debt — until goods
+ * physically arrive as a Delivery. Mutable and last-write-wins, like a product: a lost
+ * concurrent edit to an intention is annoying, never corrupting.
+ *
+ * `number` is a human label for talking to the firm ("buyurtma #007"), never a key. Two devices
+ * offline can therefore both mint #007. That is cosmetic and accepted — a collision-free counter
+ * would be exactly the shared mutable state this design avoids everywhere else.
+ */
+export interface PurchaseOrder {
+  id: string
+  supplier_id: string
+  number: string
+  ordered_at: number
+  expected_at?: number
+  lines: OrderLine[]
+  cancelled_at?: number
+  note?: string
+  user_name: string
+  user_role: Role
+  created_at: number
+  updated_at: number
+  deleted_at?: number
+}
+
+/**
+ * The event that moves stock AND money, in one atomic write. Append-only; corrected only by an
+ * opposite-signed twin, exactly like a Transaction.
+ *
+ * Two dates, and the difference is load-bearing:
+ *
+ *   created_at   — write time. Immutable. THE SYNC WATERMARK.
+ *   delivered_at — when the goods really arrived. User-editable, because deliveries get typed
+ *                  in days late.
+ *
+ * Sync MUST page on `created_at`. Paging on `delivered_at` would drop a backdated delivery
+ * behind the other device's watermark, so it would never replicate — and the two tills would
+ * disagree about what the shop owes, forever.
+ */
+export interface Delivery {
+  id: string
+  supplier_id: string
+  /** Optional: goods sometimes arrive without an order, because the agent just shows up. */
+  order_id?: string
+  created_at: number
+  delivered_at: number
+  /** Faktura number and date. The paper stays in the folder; we record the reference. */
+  doc_number?: string
+  doc_date?: number
+  lines: OrderLine[]
+  /** Snapshotted at write time, for the same reason `Transaction.cost_price` is. */
+  total_amount: number
+  note?: string
+  user_name: string
+  user_role: Role
+  voided?: boolean
+  reversal_of?: string
+}
+
+/** Money out. Append-only and immutable. Same two-date rule as Delivery. */
+export interface Payment {
+  id: string
+  supplier_id: string
+  amount: number
+  created_at: number
+  paid_at: number
+  method: PaymentMethod
+  /** To'lov topshiriqnomasi number. */
+  doc_number?: string
+  note?: string
+  user_name: string
+  user_role: Role
+  voided?: boolean
+  reversal_of?: string
 }
 
 export interface User {
