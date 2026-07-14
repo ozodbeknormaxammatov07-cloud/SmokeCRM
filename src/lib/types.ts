@@ -232,6 +232,7 @@ export type Capability =
   | 'manage-products'
   | 'void'
   | 'manage-staff'
+  | 'view-kassa'
 
 export type NewProduct = Omit<Product, 'id' | 'created_at' | 'updated_at'>
 
