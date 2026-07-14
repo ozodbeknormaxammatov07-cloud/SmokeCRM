@@ -12,6 +12,7 @@ import {
 import { Page, Kpi, MarginChip } from '../components/ui'
 import { TrendChart, BrandChart } from '../components/charts'
 import CloudBackup from '../components/CloudBackup'
+import { revenueByMethod } from '../lib/kassa'
 import type { Transaction } from '../lib/types'
 
 const PRESETS = [
@@ -50,6 +51,7 @@ export default function Reports() {
   const series = useMemo(() => timeSeries(txs, grain), [txs, grain])
   const brandRows = useMemo(() => byBrand(txs), [txs])
   const productRows = useMemo(() => byProduct(txs), [txs])
+  const byMethod = useMemo(() => revenueByMethod(txs), [txs])
 
   const applyPreset = (p: (typeof PRESETS)[number]) => {
     setFrom(p.from())
@@ -211,6 +213,16 @@ export default function Reports() {
         <Kpi label="Kirim summasi" value={moneyShort(t.restockCost)} sub="tovarga sarflandi" />
       </div>
 
+      <div className="card p-4 mt-4">
+        <h2 className="font-semibold mb-3">To'lov turi bo'yicha tushum</h2>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <MethodTile label="Naqd" value={byMethod.cash} />
+          <MethodTile label="Plastik" value={byMethod.card} />
+          <MethodTile label="Click" value={byMethod.click} />
+          {byMethod.unknown > 0 && <MethodTile label="Eski (belgilanmagan)" value={byMethod.unknown} />}
+        </div>
+      </div>
+
       <section className="card p-4 mt-4">
         <h2 className="font-semibold mb-1">Tushum va foyda dinamikasi</h2>
         <p className="text-xs text-ink-400 mb-3">Ikkalasi ham so'mda — bitta o'lchov o'qida</p>
@@ -258,6 +270,15 @@ export default function Reports() {
  * Wipes all business data on this device, behind a typed confirmation. The typed word is what
  * stops a mis-tap from erasing the shop — a single "are you sure?" is too easy to click through.
  */
+function MethodTile({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-lg bg-ink-50 border border-ink-200 p-3">
+      <div className="text-xs text-ink-500">{label}</div>
+      <div className="text-lg font-bold num tracking-tight mt-0.5">{money(value)}</div>
+    </div>
+  )
+}
+
 function DangerZone() {
   const { toast } = useStore()
   const [confirming, setConfirming] = useState(false)
