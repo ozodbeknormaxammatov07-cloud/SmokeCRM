@@ -24,7 +24,28 @@ export default function CloudBackup() {
 
   useEffect(() => onSyncState(setS), [])
 
-  if (!cloudConfigured) return null
+  // A deploy with no Supabase credentials used to render nothing at all, which is
+  // indistinguishable from "this app has no sync" — so a misconfigured host looked exactly
+  // like a missing feature. Say so instead of vanishing.
+  if (!cloudConfigured) {
+    return (
+      <section className="card p-4 mt-4">
+        <h2 className="font-semibold flex items-center gap-2">
+          ☁️ Sinxronlash
+          <span className="chip bg-amber-50 text-amber-700">Sozlanmagan</span>
+        </h2>
+        <p className="text-sm text-ink-500 mt-2 max-w-xl">
+          Bu nusxada sinxronlash o'chirilgan: ma'lumot faqat shu brauzerda saqlanadi va
+          boshqa qurilmalarga o'tmaydi. Sotuv ishlayveradi.
+        </p>
+        <p className="text-xs text-ink-400 mt-2">
+          Yoqish uchun hosting sozlamalarida <code className="font-mono">VITE_SUPABASE_URL</code> va{' '}
+          <code className="font-mono">VITE_SUPABASE_PUBLISHABLE_KEY</code> qiymatlarini kiriting
+          va saytni qaytadan deploy qiling.
+        </p>
+      </section>
+    )
+  }
 
   const signedIn = s.phase !== 'signed-out' && s.phase !== 'off'
 
