@@ -161,6 +161,22 @@ async function main() {
   try { await restoreBackup({ nope: true } as never) } catch (e) { bad = e }
   ok('garbage backup file refused', bad instanceof Error)
 
+  console.log('\n=== a sale records its payment method ===')
+  const payProd = await createProduct({
+    name: 'Marlboro', brand: 'Marlboro', cost_price: 22000, selling_price: 28000,
+    current_stock: 20, reorder_threshold: 5, active: true,
+  }, ACTOR)
+  await commitCart('SALE', [line(await byId(payProd), 2)], ACTOR, '', 'card')
+  const cardSale = (await fetchAllTransactions()).find(
+    (t) => t.product_id === payProd && t.type === 'SALE')!
+  eq('payment method stamped on the sale', cardSale.payment_method, 'card')
+
+  await commitCart('SALE', [line(await byId(payProd), 1)], ACTOR)   // default
+  const defSale = (await fetchAllTransactions())
+    .filter((t) => t.product_id === payProd && t.type === 'SALE')
+    .sort((a, b) => b.ts - a.ts)[0]
+  eq('default sale payment is cash', defSale.payment_method, 'cash')
+
   console.log('\n=== resetAllData wipes the business stores ===')
   ok('there is data to wipe', (await fetchAllTransactions()).length > 0 && (await products()).length > 0)
   await resetAllData()

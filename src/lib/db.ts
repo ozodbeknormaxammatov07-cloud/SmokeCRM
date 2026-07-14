@@ -3,7 +3,7 @@ import {
 } from './idb'
 import type {
   Product, NewProduct, Transaction, TxType, Supplier, CartLine, User,
-  PurchaseOrder, Delivery, Payment,
+  PurchaseOrder, Delivery, Payment, SalePaymentMethod,
 } from './types'
 
 interface Actor {
@@ -173,6 +173,7 @@ export async function commitCart(
   lines: CartLine[],
   actor: Actor,
   note = '',
+  payment: SalePaymentMethod = 'cash',
 ): Promise<{ ref_id: string; total: number; profit: number }> {
   if (!lines.length) throw new Error("Savat bo'sh")
 
@@ -240,6 +241,8 @@ export async function commitCart(
         user_role: actor.role,
         ref_id,
         voided: false,
+        // Only a SALE carries a payment method; a RESTOCK's money doesn't hit the drawer.
+        payment_method: type === 'SALE' ? payment : undefined,
       } satisfies Transaction)
     }
 

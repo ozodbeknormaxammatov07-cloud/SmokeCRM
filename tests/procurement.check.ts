@@ -27,7 +27,7 @@ const byId = async (id: string) => (await products()).find((p) => p.id === id)!
 async function main() {
   console.log('\n=== the new stores exist at DB v2 ===')
   const db = await openDb()
-  eq('db version', db.version, 3)
+  eq('db version', db.version, 4)
   ok('purchase_orders store', db.objectStoreNames.contains(STORES.purchase_orders))
   ok('deliveries store', db.objectStoreNames.contains(STORES.deliveries))
   ok('payments store', db.objectStoreNames.contains(STORES.payments))

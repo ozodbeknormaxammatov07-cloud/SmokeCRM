@@ -7,7 +7,7 @@
  */
 
 export const DB_NAME = 'tamaki-savdo'
-const DB_VERSION = 3
+const DB_VERSION = 4
 
 export const STORES = {
   products: 'products',
@@ -17,6 +17,7 @@ export const STORES = {
   deliveries: 'deliveries',
   payments: 'payments',
   users: 'users',
+  cash_movements: 'cash_movements',
 } as const
 
 export type StoreName = (typeof STORES)[keyof typeof STORES]
@@ -69,6 +70,12 @@ export function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORES.users)) {
         const s = db.createObjectStore(STORES.users, { keyPath: 'id' })
         s.createIndex('name', 'name')
+      }
+
+      // v4 — manual cash drawer movements.
+      if (!db.objectStoreNames.contains(STORES.cash_movements)) {
+        const s = db.createObjectStore(STORES.cash_movements, { keyPath: 'id' })
+        s.createIndex('created_at', 'created_at')
       }
     }
 
