@@ -1,8 +1,12 @@
 import 'fake-indexeddb/auto'
 import { openDb, STORES, tx, getAll } from '../src/lib/idb'
 import { createProduct, commitCart, fetchAllTransactions } from '../src/lib/db'
-import { createDelivery, voidDelivery, fetchDeliveries } from '../src/lib/procurement'
-import { supplierBalance } from '../src/lib/payables'
+import {
+  createDelivery, voidDelivery, fetchDeliveries,
+  recordPayment, voidPayment, fetchPayments,
+  savePurchaseOrder, cancelPurchaseOrder, fetchPurchaseOrders,
+} from '../src/lib/procurement'
+import { supplierBalance, orderStatus, outstandingLines } from '../src/lib/payables'
 import type { Product } from '../src/lib/types'
 
 let fail = 0
@@ -108,6 +112,121 @@ async function main() {
     await createDelivery({ supplier_id: 'F1', delivered_at: Date.now(), lines: [] }, ACTOR)
   } catch (e) { threw = e }
   ok('empty delivery refused', threw instanceof Error)
+
+  /* ---------------------------------------------------------------- */
+  /* Payments                                                          */
+  /* ---------------------------------------------------------------- */
+
+  console.log('\n=== payments reduce the debt ===')
+  const balF3 = async () => {
+    const [d, p] = await Promise.all([fetchDeliveries(), fetchPayments()])
+    return supplierBalance(
+      d.filter((x) => x.supplier_id === 'F3'),
+      p.filter((x) => x.supplier_id === 'F3'),
+    )
+  }
+
+  const p3 = await createProduct({
+    name: 'Kent', brand: 'Kent', cost_price: 18_000, selling_price: 24_000,
+    current_stock: 0, reorder_threshold: 5, active: true,
+  }, ACTOR)
+  await createDelivery({
+    supplier_id: 'F3', delivered_at: Date.now(),
+    lines: [{ product_id: p3, product_name: 'Kent', brand: 'Kent', quantity: 100, unit_cost: 18_000 }],
+  }, ACTOR)
+  eq('owed after the delivery', await balF3(), 1_800_000)
+
+  const payId = await recordPayment({
+    supplier_id: 'F3', amount: 800_000, paid_at: Date.now(),
+    method: 'bank', doc_number: 'TT-19',
+  }, ACTOR)
+  eq('debt reduced by the payment', await balF3(), 1_000_000)
+
+  console.log('\n=== a payment before any delivery is a prepayment (negative balance) ===')
+  await recordPayment({
+    supplier_id: 'F4', amount: 2_000_000, paid_at: Date.now(), method: 'cash',
+  }, ACTOR)
+  const prepaid = (await fetchPayments()).filter((p) => p.supplier_id === 'F4')
+  eq('prepayment reads as a negative balance', supplierBalance([], prepaid), -2_000_000)
+
+  console.log('\n=== voiding a payment restores the debt ===')
+  await voidPayment(payId, ACTOR)
+  eq('debt back to the full amount', await balF3(), 1_800_000)
+
+  const pays = await fetchPayments()
+  const origPay = pays.find((p) => p.id === payId)!
+  const twinPay = pays.find((p) => p.reversal_of === payId)!
+  ok('original payment flagged, not deleted', origPay.voided === true)
+  eq('twin payment is opposite-signed', twinPay.amount, -800_000)
+
+  threw = null
+  try { await voidPayment(payId, ACTOR) } catch (e) { threw = e }
+  ok('double-void refused', threw instanceof Error)
+
+  threw = null
+  try {
+    await recordPayment({ supplier_id: 'F3', amount: 0, paid_at: Date.now(), method: 'cash' }, ACTOR)
+  } catch (e) { threw = e }
+  ok('a payment of zero is refused', threw instanceof Error)
+
+  /* ---------------------------------------------------------------- */
+  /* Purchase orders                                                   */
+  /* ---------------------------------------------------------------- */
+
+  console.log('\n=== an order is an intention: it moves no stock and no money ===')
+  const stockBeforeOrder = (await byId(p3)).current_stock
+  const debtBeforeOrder = await balF3()
+
+  const oid = await savePurchaseOrder({
+    supplier_id: 'F3',
+    ordered_at: Date.now(),
+    expected_at: Date.now() + 7 * 86_400_000,
+    lines: [{ product_id: p3, product_name: 'Kent', brand: 'Kent', quantity: 50, unit_cost: 18_000 }],
+  }, ACTOR)
+
+  eq('ordering moved no stock', (await byId(p3)).current_stock, stockBeforeOrder)
+  eq('ordering moved no money', await balF3(), debtBeforeOrder)
+
+  const o = (await fetchPurchaseOrders()).find((x) => x.id === oid)!
+  ok('the order got a human number', /^#\d{3}$/.test(o.number))
+  eq('a fresh order is waiting', orderStatus(o, await fetchDeliveries()), 'waiting')
+
+  console.log('\n=== receiving against an order advances its status ===')
+  await createDelivery({
+    supplier_id: 'F3', order_id: oid, delivered_at: Date.now(),
+    lines: [{ product_id: p3, product_name: 'Kent', brand: 'Kent', quantity: 20, unit_cost: 18_000 }],
+  }, ACTOR)
+  eq('partly received', orderStatus(o, await fetchDeliveries()), 'partial')
+  eq('what is still owed', outstandingLines(o, await fetchDeliveries()).map((l) => l.quantity), [30])
+
+  await createDelivery({
+    supplier_id: 'F3', order_id: oid, delivered_at: Date.now(),
+    lines: [{ product_id: p3, product_name: 'Kent', brand: 'Kent', quantity: 30, unit_cost: 18_000 }],
+  }, ACTOR)
+  eq('fully received', orderStatus(o, await fetchDeliveries()), 'received')
+
+  console.log('\n=== order numbers increment ===')
+  const oid2 = await savePurchaseOrder({
+    supplier_id: 'F3', ordered_at: Date.now(),
+    lines: [{ product_id: p3, product_name: 'Kent', brand: 'Kent', quantity: 5, unit_cost: 18_000 }],
+  }, ACTOR)
+  const o2 = (await fetchPurchaseOrders()).find((x) => x.id === oid2)!
+  eq('second order is #002', o2.number, '#002')
+
+  console.log('\n=== cancelling an order ===')
+  await cancelPurchaseOrder(oid2)
+  const o2c = (await fetchPurchaseOrders()).find((x) => x.id === oid2)!
+  eq('cancelled', orderStatus(o2c, await fetchDeliveries()), 'cancelled')
+
+  console.log('\n=== editing an order keeps its id and number ===')
+  await savePurchaseOrder({
+    id: oid,
+    supplier_id: 'F3', ordered_at: o.ordered_at,
+    lines: [{ product_id: p3, product_name: 'Kent', brand: 'Kent', quantity: 99, unit_cost: 18_000 }],
+  }, ACTOR)
+  const oEdited = (await fetchPurchaseOrders()).find((x) => x.id === oid)!
+  eq('number preserved across an edit', oEdited.number, o.number)
+  eq('lines updated', oEdited.lines[0].quantity, 99)
 
   console.log(fail === 0 ? '\n✅ ALL PROCUREMENT CHECKS PASSED\n' : `\n❌ ${fail} CHECK(S) FAILED\n`)
   process.exit(fail === 0 ? 0 : 1)
