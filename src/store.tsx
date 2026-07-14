@@ -8,8 +8,11 @@ import {
   type ReactNode,
 } from 'react'
 import { initDb, watchProducts, watchRecentTransactions, watchSuppliers } from './lib/db'
+import { watchDeliveries, watchPayments, watchPurchaseOrders } from './lib/procurement'
 import { startAutoSync } from './lib/sync'
-import type { Product, Transaction, Supplier, Role } from './lib/types'
+import type {
+  Product, Transaction, Supplier, Role, Delivery, Payment, PurchaseOrder,
+} from './lib/types'
 
 const BASE_BRANDS = ['UzBat', 'Parliament', 'Winston', 'Esse']
 
@@ -24,6 +27,9 @@ interface Store {
   products: Product[]
   recent: Transaction[]
   suppliers: Supplier[]
+  deliveries: Delivery[]
+  payments: Payment[]
+  orders: PurchaseOrder[]
   brands: string[]
   actor: Actor
   setActor: (a: Actor) => void
@@ -51,6 +57,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [products, setProducts] = useState<Product[]>([])
   const [recent, setRecent] = useState<Transaction[]>([])
   const [suppliers, setSuppliers] = useState<Supplier[]>([])
+  const [deliveries, setDeliveries] = useState<Delivery[]>([])
+  const [payments, setPayments] = useState<Payment[]>([])
+  const [orders, setOrders] = useState<PurchaseOrder[]>([])
   const [actor, setActorState] = useState<Actor>(loadActor)
   const [toasts, setToasts] = useState<{ id: number; msg: string; kind: 'ok' | 'err' }[]>([])
 
@@ -79,6 +88,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }),
           watchRecentTransactions(300, setRecent),
           watchSuppliers(setSuppliers),
+          watchDeliveries(setDeliveries),
+          watchPayments(setPayments),
+          watchPurchaseOrders(setOrders),
           // Cloud backup is strictly additive: if it's unconfigured or the network is down,
           // this is a no-op and the till carries on exactly as before.
           startAutoSync(),
@@ -101,7 +113,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [products])
 
   const value: Store = {
-    ready, error, products, recent, suppliers, brands, actor, setActor, toast, toasts,
+    ready, error, products, recent, suppliers, deliveries, payments, orders,
+    brands, actor, setActor, toast, toasts,
   }
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
