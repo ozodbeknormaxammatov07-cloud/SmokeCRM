@@ -6,6 +6,7 @@ import { money, num, parseNum, marginPct } from '../lib/format'
 import { stockLevel, productMargin } from '../lib/analytics'
 import { Page, StockBadge, MarginChip, Modal, Empty } from '../components/ui'
 import ImportWizard from '../components/ImportWizard'
+import { can } from '../lib/auth'
 import type { NewProduct, Product } from '../lib/types'
 
 const BLANK: NewProduct = {
@@ -15,6 +16,8 @@ const BLANK: NewProduct = {
 
 export default function Products() {
   const { products, brands, actor, toast } = useStore()
+  // A cashier browses the list to look things up, but sees no cost/margin and cannot change it.
+  const manage = can(actor.role, 'manage-products')
 
   const [q, setQ] = useState('')
   const [brand, setBrand] = useState('')
@@ -43,13 +46,15 @@ export default function Products() {
       title="Mahsulotlar"
       subtitle={`${num(products.length)} ta mahsulot · ${num(lowCount)} tasi kam qolgan`}
       actions={
-        <>
-          <button className="btn-ghost" onClick={() => setImportOpen(true)}>📄 Excel import</button>
-          <button className="btn-ghost" onClick={() => exportProducts(products)} disabled={!products.length}>
-            ⬇ Eksport
-          </button>
-          <button className="btn-primary" onClick={() => setEditing('new')}>+ Mahsulot</button>
-        </>
+        manage ? (
+          <>
+            <button className="btn-ghost" onClick={() => setImportOpen(true)}>📄 Excel import</button>
+            <button className="btn-ghost" onClick={() => exportProducts(products)} disabled={!products.length}>
+              ⬇ Eksport
+            </button>
+            <button className="btn-primary" onClick={() => setEditing('new')}>+ Mahsulot</button>
+          </>
+        ) : undefined
       }
     >
       <div className="card p-3 mb-4 flex flex-wrap gap-2 items-center">
@@ -85,13 +90,13 @@ export default function Products() {
                 <tr>
                   <th className="th">Mahsulot</th>
                   <th className="th">Brend</th>
-                  <th className="th text-right">Kelish</th>
+                  {manage && <th className="th text-right">Kelish</th>}
                   <th className="th text-right">Sotish</th>
-                  <th className="th text-right">Foyda/dona</th>
-                  <th className="th text-right">Marja</th>
+                  {manage && <th className="th text-right">Foyda/dona</th>}
+                  {manage && <th className="th text-right">Marja</th>}
                   <th className="th text-right">Qoldiq</th>
-                  <th className="th text-right">Qiymati</th>
-                  <th className="th"></th>
+                  {manage && <th className="th text-right">Qiymati</th>}
+                  {manage && <th className="th"></th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-ink-100">
@@ -105,26 +110,36 @@ export default function Products() {
                         {!p.active && <span className="ml-2 chip bg-ink-100 text-ink-500">nofaol</span>}
                       </td>
                       <td className="td text-ink-500">{p.brand}</td>
-                      <td className="td text-right num">{money(p.cost_price)}</td>
+                      {manage && <td className="td text-right num">{money(p.cost_price)}</td>}
                       <td className="td text-right num">{money(p.selling_price)}</td>
-                      <td className={`td text-right num font-medium ${unitProfit <= 0 ? 'text-red-600' : 'text-emerald-600'}`}>
-                        {money(unitProfit)}
-                      </td>
-                      <td className="td text-right"><MarginChip value={productMargin(p)} /></td>
+                      {manage && (
+                        <td className={`td text-right num font-medium ${unitProfit <= 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                          {money(unitProfit)}
+                        </td>
+                      )}
+                      {manage && <td className="td text-right"><MarginChip value={productMargin(p)} /></td>}
                       <td className="td text-right">
-                        <button onClick={() => setAdjusting(p)} title="Qoldiqni tuzatish">
+                        {manage ? (
+                          <button onClick={() => setAdjusting(p)} title="Qoldiqni tuzatish">
+                            <StockBadge level={level} stock={p.current_stock} />
+                          </button>
+                        ) : (
                           <StockBadge level={level} stock={p.current_stock} />
-                        </button>
+                        )}
                       </td>
-                      <td className="td text-right num text-ink-500">{money(p.cost_price * p.current_stock)}</td>
-                      <td className="td text-right">
-                        <button
-                          onClick={() => setEditing(p)}
-                          className="text-xs font-semibold text-ink-500 hover:text-ink-900"
-                        >
-                          Tahrirlash
-                        </button>
-                      </td>
+                      {manage && (
+                        <td className="td text-right num text-ink-500">{money(p.cost_price * p.current_stock)}</td>
+                      )}
+                      {manage && (
+                        <td className="td text-right">
+                          <button
+                            onClick={() => setEditing(p)}
+                            className="text-xs font-semibold text-ink-500 hover:text-ink-900"
+                          >
+                            Tahrirlash
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   )
                 })}

@@ -9,8 +9,9 @@ import {
 } from 'react'
 import { initDb, watchProducts, watchRecentTransactions, watchSuppliers } from './lib/db'
 import { watchDeliveries, watchPayments, watchPurchaseOrders } from './lib/procurement'
+import { hasAnyAccount, getAccount, login as authLogin, createAccount } from './lib/auth'
 import type {
-  Product, Transaction, Supplier, Role, Delivery, Payment, PurchaseOrder,
+  Product, Transaction, Supplier, Role, Delivery, Payment, PurchaseOrder, Account,
 } from './lib/types'
 
 const BASE_BRANDS = ['UzBat', 'Parliament', 'Winston', 'Esse']
@@ -30,25 +31,22 @@ interface Store {
   payments: Payment[]
   orders: PurchaseOrder[]
   brands: string[]
+  /** The signed-in account, or null when the login screen should show. */
+  account: Account | null
+  /** True when the shop has no accounts yet — show the create-first-admin screen. */
+  needsSetup: boolean
+  /** Who stamps each ledger write. Derived from the signed-in account. */
   actor: Actor
-  setActor: (a: Actor) => void
+  login: (name: string, password: string) => Promise<boolean>
+  logout: () => void
+  createFirstAdmin: (name: string, password: string) => Promise<boolean>
   toast: (msg: string, kind?: 'ok' | 'err') => void
   toasts: { id: number; msg: string; kind: 'ok' | 'err' }[]
 }
 
 const Ctx = createContext<Store | null>(null)
 
-const ACTOR_KEY = 'ts.actor'
-
-function loadActor(): Actor {
-  try {
-    const raw = localStorage.getItem(ACTOR_KEY)
-    if (raw) return JSON.parse(raw) as Actor
-  } catch {
-    /* first run */
-  }
-  return { name: 'Sotuvchi', role: 'admin' }
-}
+const SESSION_KEY = 'ts.session'
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false)
@@ -59,12 +57,31 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [deliveries, setDeliveries] = useState<Delivery[]>([])
   const [payments, setPayments] = useState<Payment[]>([])
   const [orders, setOrders] = useState<PurchaseOrder[]>([])
-  const [actor, setActorState] = useState<Actor>(loadActor)
+  const [account, setAccount] = useState<Account | null>(null)
+  const [needsSetup, setNeedsSetup] = useState(false)
   const [toasts, setToasts] = useState<{ id: number; msg: string; kind: 'ok' | 'err' }[]>([])
 
-  const setActor = useCallback((a: Actor) => {
-    setActorState(a)
-    localStorage.setItem(ACTOR_KEY, JSON.stringify(a))
+  const login = useCallback(async (name: string, password: string) => {
+    const a = await authLogin(name, password)
+    if (!a) return false
+    localStorage.setItem(SESSION_KEY, a.id)
+    setAccount(a)
+    setNeedsSetup(false)
+    return true
+  }, [])
+
+  const logout = useCallback(() => {
+    localStorage.removeItem(SESSION_KEY)
+    setAccount(null)
+  }, [])
+
+  const createFirstAdmin = useCallback(async (name: string, password: string) => {
+    if (await hasAnyAccount()) return false // never mint a second "first" admin
+    const a = await createAccount({ name, role: 'admin', password })
+    localStorage.setItem(SESSION_KEY, a.id)
+    setAccount(a)
+    setNeedsSetup(false)
+    return true
   }, [])
 
   const toast = useCallback((msg: string, kind: 'ok' | 'err' = 'ok') => {
@@ -91,6 +108,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           watchPayments(setPayments),
           watchPurchaseOrders(setOrders),
         ]
+
+        // Resolve who is signed in, if anyone. A stored session id that no longer maps to a
+        // live account (deleted, or a wiped browser) falls back to the login screen.
+        void (async () => {
+          const anyAccount = await hasAnyAccount()
+          if (cancelled) return
+          setNeedsSetup(!anyAccount)
+          const sid = localStorage.getItem(SESSION_KEY)
+          if (sid) {
+            const a = await getAccount(sid)
+            if (cancelled) return
+            if (a) setAccount(a)
+            else localStorage.removeItem(SESSION_KEY)
+          }
+        })()
       })
       .catch((e: Error) => {
         if (!cancelled) setError(e.message)
@@ -108,9 +140,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return [...set].sort()
   }, [products])
 
+  // Every ledger write is stamped with whoever is signed in. The placeholder is never used: the
+  // app never renders a write path while signed out (App.tsx shows the login screen instead).
+  const actor: Actor = account
+    ? { name: account.name, role: account.role }
+    : { name: '', role: 'cashier' }
+
   const value: Store = {
     ready, error, products, recent, suppliers, deliveries, payments, orders,
-    brands, actor, setActor, toast, toasts,
+    brands, account, needsSetup, actor, login, logout, createFirstAdmin, toast, toasts,
   }
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

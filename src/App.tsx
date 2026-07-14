@@ -1,7 +1,8 @@
 import { NavLink, Route, Routes, Navigate } from 'react-router-dom'
-import { useState } from 'react'
+import type { JSX } from 'react'
 import { useStore } from './store'
-import { Toasts, Modal } from './components/ui'
+import { Toasts } from './components/ui'
+import { can } from './lib/auth'
 import Dashboard from './pages/Dashboard'
 import Products from './pages/Products'
 import Sales from './pages/Sales'
@@ -10,20 +11,29 @@ import Reports from './pages/Reports'
 import Firms from './pages/Firms'
 import FirmDetail from './pages/FirmDetail'
 import Orders from './pages/Orders'
-import type { Role } from './lib/types'
+import Staff from './pages/Staff'
+import Login from './pages/Login'
+import type { Capability } from './lib/types'
 
-const NAV = [
-  { to: '/', label: 'Boshqaruv', icon: '📊', end: true },
+const NAV: { to: string; label: string; icon: string; end?: boolean; cap?: Capability }[] = [
+  { to: '/', label: 'Boshqaruv', icon: '📊', end: true, cap: 'view-dashboard' },
   { to: '/sotuv', label: 'Sotuv', icon: '🛒' },
-  { to: '/kirim', label: 'Kirim', icon: '📥' },
+  { to: '/kirim', label: 'Kirim', icon: '📥', cap: 'receive-stock' },
   { to: '/mahsulotlar', label: 'Mahsulotlar', icon: '📦' },
-  { to: '/firmalar', label: 'Firmalar', icon: '💼' },
-  { to: '/hisobot', label: 'Hisobot', icon: '📈' },
+  { to: '/firmalar', label: 'Firmalar', icon: '💼', cap: 'view-firms' },
+  { to: '/hisobot', label: 'Hisobot', icon: '📈', cap: 'view-reports' },
+  { to: '/xodimlar', label: 'Xodimlar', icon: '👥', cap: 'manage-staff' },
 ]
 
+/** Redirects to Sotuv anyone who reaches a route their role can't use. */
+function RequireCap({ cap, children }: { cap: Capability; children: JSX.Element }) {
+  const { account } = useStore()
+  if (!account || !can(account.role, cap)) return <Navigate to="/sotuv" replace />
+  return children
+}
+
 export default function App() {
-  const { ready, error, actor, setActor } = useStore()
-  const [userOpen, setUserOpen] = useState(false)
+  const { ready, error, account, needsSetup, actor, logout } = useStore()
 
   if (error) {
     return (
@@ -52,6 +62,13 @@ export default function App() {
     )
   }
 
+  // Everything past here requires a signed-in account.
+  if (needsSetup || !account) return <Login />
+
+  // Only the tabs this role may use. A cashier sees two; an admin sees them all.
+  const nav = NAV.filter((n) => !n.cap || can(account.role, n.cap))
+  const home = can(account.role, 'view-dashboard') ? '/' : '/sotuv'
+
   return (
     <div className="min-h-screen flex flex-col sm:flex-row">
       {/* Sidebar — desktop */}
@@ -61,7 +78,7 @@ export default function App() {
           <div className="text-xs text-ink-400 mt-0.5">Ombor va sotuv tizimi</div>
         </div>
         <nav className="flex-1 px-3 space-y-0.5">
-          {NAV.map((n) => (
+          {nav.map((n) => (
             <NavLink
               key={n.to}
               to={n.to}
@@ -78,12 +95,12 @@ export default function App() {
           ))}
         </nav>
         <button
-          onClick={() => setUserOpen(true)}
+          onClick={logout}
           className="m-3 p-3 rounded-lg text-left hover:bg-ink-100 transition-colors"
         >
           <div className="text-sm font-semibold truncate">{actor.name}</div>
           <div className="text-xs text-ink-400">
-            {actor.role === 'admin' ? 'Administrator' : 'Kassir'} · almashtirish
+            {actor.role === 'admin' ? 'Administrator' : 'Kassir'} · chiqish
           </div>
         </button>
       </aside>
@@ -91,28 +108,32 @@ export default function App() {
       {/* Top bar — mobile */}
       <header className="sm:hidden sticky top-0 z-30 bg-white border-b border-ink-200 px-4 h-14 flex items-center justify-between">
         <div className="font-bold tracking-tight">Tamaki Savdo</div>
-        <button onClick={() => setUserOpen(true)} className="text-xs font-semibold text-ink-500">
-          {actor.name}
+        <button onClick={logout} className="text-xs font-semibold text-ink-500">
+          {actor.name} · chiqish
         </button>
       </header>
 
       <main className="flex-1 min-w-0 pb-20 sm:pb-0">
         <Routes>
-          <Route path="/" element={<Dashboard />} />
+          <Route path="/" element={<RequireCap cap="view-dashboard"><Dashboard /></RequireCap>} />
           <Route path="/sotuv" element={<Sales />} />
-          <Route path="/kirim" element={<Restock />} />
+          <Route path="/kirim" element={<RequireCap cap="receive-stock"><Restock /></RequireCap>} />
           <Route path="/mahsulotlar" element={<Products />} />
-          <Route path="/firmalar" element={<Firms />} />
-          <Route path="/firmalar/:id" element={<FirmDetail />} />
-          <Route path="/buyurtmalar" element={<Orders />} />
-          <Route path="/hisobot" element={<Reports />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route path="/firmalar" element={<RequireCap cap="view-firms"><Firms /></RequireCap>} />
+          <Route path="/firmalar/:id" element={<RequireCap cap="view-firms"><FirmDetail /></RequireCap>} />
+          <Route path="/buyurtmalar" element={<RequireCap cap="view-firms"><Orders /></RequireCap>} />
+          <Route path="/hisobot" element={<RequireCap cap="view-reports"><Reports /></RequireCap>} />
+          <Route path="/xodimlar" element={<RequireCap cap="manage-staff"><Staff /></RequireCap>} />
+          <Route path="*" element={<Navigate to={home} replace />} />
         </Routes>
       </main>
 
       {/* Bottom nav — mobile */}
-      <nav className="sm:hidden fixed bottom-0 inset-x-0 z-40 bg-white border-t border-ink-200 grid grid-cols-6 pb-[env(safe-area-inset-bottom)]">
-        {NAV.map((n) => (
+      <nav
+        className="sm:hidden fixed bottom-0 inset-x-0 z-40 bg-white border-t border-ink-200 grid pb-[env(safe-area-inset-bottom)]"
+        style={{ gridTemplateColumns: `repeat(${nav.length}, minmax(0, 1fr))` }}
+      >
+        {nav.map((n) => (
           <NavLink
             key={n.to}
             to={n.to}
@@ -128,34 +149,6 @@ export default function App() {
           </NavLink>
         ))}
       </nav>
-
-      <Modal open={userOpen} onClose={() => setUserOpen(false)} title="Xodim">
-        <p className="text-sm text-ink-500 mb-4">
-          Har bir sotuv va kirim yozuvi shu nom bilan saqlanadi.
-        </p>
-        <label className="label">Ism</label>
-        <input
-          className="field mb-4"
-          value={actor.name}
-          onChange={(e) => setActor({ ...actor, name: e.target.value })}
-          placeholder="Ism"
-        />
-        <label className="label">Lavozim</label>
-        <div className="grid grid-cols-2 gap-2">
-          {(['admin', 'cashier'] as Role[]).map((r) => (
-            <button
-              key={r}
-              onClick={() => setActor({ ...actor, role: r })}
-              className={`btn ${actor.role === r ? 'btn-primary' : 'btn-ghost'}`}
-            >
-              {r === 'admin' ? 'Administrator' : 'Kassir'}
-            </button>
-          ))}
-        </div>
-        <button className="btn-primary w-full mt-5" onClick={() => setUserOpen(false)}>
-          Saqlash
-        </button>
-      </Modal>
 
       <Toasts />
     </div>
