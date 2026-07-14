@@ -8,3 +8,6 @@ tsconfig.tsbuildinfo
 
 # Netlify local link state (machine-specific)
 .netlify/
+
+# stray local build artifacts
+tmp/
