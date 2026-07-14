@@ -3,7 +3,7 @@ import {
 } from './idb'
 import type {
   Product, NewProduct, Transaction, TxType, Supplier, CartLine, User,
-  PurchaseOrder, Delivery, Payment,
+  PurchaseOrder, Delivery, Payment, SalePaymentMethod, CashMovement,
 } from './types'
 
 interface Actor {
@@ -173,6 +173,7 @@ export async function commitCart(
   lines: CartLine[],
   actor: Actor,
   note = '',
+  payment: SalePaymentMethod = 'cash',
 ): Promise<{ ref_id: string; total: number; profit: number }> {
   if (!lines.length) throw new Error("Savat bo'sh")
 
@@ -240,6 +241,8 @@ export async function commitCart(
         user_role: actor.role,
         ref_id,
         voided: false,
+        // Only a SALE carries a payment method; a RESTOCK's money doesn't hit the drawer.
+        payment_method: type === 'SALE' ? payment : undefined,
       } satisfies Transaction)
     }
 
@@ -465,6 +468,7 @@ export interface Backup {
   purchase_orders: PurchaseOrder[]
   deliveries: Delivery[]
   payments: Payment[]
+  cash_movements: CashMovement[]
 }
 
 export async function exportBackup(): Promise<Backup> {
@@ -472,13 +476,15 @@ export async function exportBackup(): Promise<Backup> {
     allProducts(),
     fetchAllTransactions(),
     tx(
-      [STORES.suppliers, STORES.purchase_orders, STORES.deliveries, STORES.payments],
+      [STORES.suppliers, STORES.purchase_orders, STORES.deliveries, STORES.payments,
+        STORES.cash_movements],
       'readonly',
       async (t) => ({
         suppliers: await getAll<Supplier>(t, STORES.suppliers),
         purchase_orders: await getAll<PurchaseOrder>(t, STORES.purchase_orders),
         deliveries: await getAll<Delivery>(t, STORES.deliveries),
         payments: await getAll<Payment>(t, STORES.payments),
+        cash_movements: await getAll<CashMovement>(t, STORES.cash_movements),
       }),
     ),
   ])
@@ -494,7 +500,7 @@ export async function exportBackup(): Promise<Backup> {
 
 const BACKUP_STORES = [
   STORES.products, STORES.transactions, STORES.suppliers,
-  STORES.purchase_orders, STORES.deliveries, STORES.payments,
+  STORES.purchase_orders, STORES.deliveries, STORES.payments, STORES.cash_movements,
 ]
 
 /**
@@ -554,6 +560,7 @@ export async function restoreBackup(b: Backup): Promise<{
     for (const o of b.purchase_orders ?? []) await put(t, STORES.purchase_orders, o)
     for (const d of b.deliveries ?? []) await put(t, STORES.deliveries, d)
     for (const p of b.payments ?? []) await put(t, STORES.payments, p)
+    for (const m of b.cash_movements ?? []) await put(t, STORES.cash_movements, m)
   })
 
   notify()
@@ -581,6 +588,7 @@ export interface SyncSnapshot {
   purchase_orders: PurchaseOrder[]
   deliveries: Delivery[]
   payments: Payment[]
+  cash_movements: CashMovement[]
 }
 
 export async function snapshotForSync(): Promise<SyncSnapshot> {
@@ -591,6 +599,7 @@ export async function snapshotForSync(): Promise<SyncSnapshot> {
     purchase_orders: await getAll<PurchaseOrder>(t, STORES.purchase_orders),
     deliveries: await getAll<Delivery>(t, STORES.deliveries),
     payments: await getAll<Payment>(t, STORES.payments),
+    cash_movements: await getAll<CashMovement>(t, STORES.cash_movements),
   }))
 }
 
@@ -679,6 +688,16 @@ export async function mergeRemote(remote: SyncSnapshot): Promise<number> {
       if (cur && Boolean(cur.voided) === voided) continue
 
       await put(t, STORES.payments, { ...r, voided })
+      changed++
+    }
+
+    // Cash movements are money too — same append-only + OR-on-voided rule as payments.
+    for (const r of remote.cash_movements ?? []) {
+      const cur = await get<CashMovement>(t, STORES.cash_movements, r.id)
+      const voided = Boolean(cur?.voided) || Boolean(r.voided)
+      if (cur && Boolean(cur.voided) === voided) continue
+
+      await put(t, STORES.cash_movements, { ...r, voided })
       changed++
     }
 

@@ -12,6 +12,7 @@ import Firms from './pages/Firms'
 import FirmDetail from './pages/FirmDetail'
 import Orders from './pages/Orders'
 import Staff from './pages/Staff'
+import Kassa from './pages/Kassa'
 import Login from './pages/Login'
 import type { Capability } from './lib/types'
 
@@ -22,6 +23,7 @@ const NAV: { to: string; label: string; icon: string; end?: boolean; cap?: Capab
   { to: '/mahsulotlar', label: 'Mahsulotlar', icon: '📦' },
   { to: '/firmalar', label: 'Firmalar', icon: '💼', cap: 'view-firms' },
   { to: '/hisobot', label: 'Hisobot', icon: '📈', cap: 'view-reports' },
+  { to: '/kassa', label: 'Kassa', icon: '💵', cap: 'view-kassa' },
   { to: '/xodimlar', label: 'Xodimlar', icon: '👥', cap: 'manage-staff' },
 ]
 
@@ -123,6 +125,7 @@ export default function App() {
           <Route path="/firmalar/:id" element={<RequireCap cap="view-firms"><FirmDetail /></RequireCap>} />
           <Route path="/buyurtmalar" element={<RequireCap cap="view-firms"><Orders /></RequireCap>} />
           <Route path="/hisobot" element={<RequireCap cap="view-reports"><Reports /></RequireCap>} />
+          <Route path="/kassa" element={<RequireCap cap="view-kassa"><Kassa /></RequireCap>} />
           <Route path="/xodimlar" element={<RequireCap cap="manage-staff"><Staff /></RequireCap>} />
           <Route path="*" element={<Navigate to={home} replace />} />
         </Routes>

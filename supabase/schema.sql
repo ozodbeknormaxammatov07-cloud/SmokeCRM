@@ -203,6 +203,33 @@ create index if not exists payments_user_created_idx  on public.payments (user_i
 create index if not exists payments_user_supplier_idx on public.payments (user_id, supplier_id);
 
 -- ---------------------------------------------------------------------------
+-- Cash drawer (Kassa)
+-- ---------------------------------------------------------------------------
+-- How each sale was paid (naqd/plastik/click). Only naqd sales feed the physical drawer.
+alter table public.transactions add column if not exists payment_method text;
+
+-- Manual cash-drawer movements: deposits, expenses, withdrawals, and count corrections. Money,
+-- so append-only and corrected by an opposite-signed twin, and paged on created_at like payments.
+create table if not exists public.cash_movements (
+  user_id     uuid    not null references auth.users(id) on delete cascade,
+  id          text    not null,
+  ts          bigint  not null,
+  created_at  bigint  not null,
+  amount      numeric not null default 0,
+  kind        text    not null check (kind in ('deposit','expense','withdrawal','correction')),
+  reason      text    not null default '',
+  note        text,
+  user_name   text    not null default '',
+  user_role   text    not null default 'admin',
+  voided      boolean not null default false,
+  reversal_of text,
+  synced_at   timestamptz not null default now(),
+  primary key (user_id, id)
+);
+
+create index if not exists cash_movements_user_created_idx on public.cash_movements (user_id, created_at);
+
+-- ---------------------------------------------------------------------------
 -- Row-level security
 -- ---------------------------------------------------------------------------
 -- The publishable key ships inside the JS bundle and is readable by anyone who opens the
@@ -215,6 +242,7 @@ alter table public.suppliers       enable row level security;
 alter table public.purchase_orders enable row level security;
 alter table public.deliveries      enable row level security;
 alter table public.payments        enable row level security;
+alter table public.cash_movements  enable row level security;
 
 -- `TO authenticated` alone would be authentication without authorization — it proves someone
 -- is signed in, not that the row is theirs. The `user_id = auth.uid()` predicate is what does
@@ -311,6 +339,21 @@ create policy payments_update on public.payments
 create policy payments_delete on public.payments
   for delete to authenticated using ((select auth.uid()) = user_id);
 
+drop policy if exists cash_movements_select on public.cash_movements;
+drop policy if exists cash_movements_insert on public.cash_movements;
+drop policy if exists cash_movements_update on public.cash_movements;
+drop policy if exists cash_movements_delete on public.cash_movements;
+
+create policy cash_movements_select on public.cash_movements
+  for select to authenticated using ((select auth.uid()) = user_id);
+create policy cash_movements_insert on public.cash_movements
+  for insert to authenticated with check ((select auth.uid()) = user_id);
+create policy cash_movements_update on public.cash_movements
+  for update to authenticated
+  using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
+create policy cash_movements_delete on public.cash_movements
+  for delete to authenticated using ((select auth.uid()) = user_id);
+
 -- ---------------------------------------------------------------------------
 -- Grants
 -- ---------------------------------------------------------------------------
@@ -329,6 +372,7 @@ revoke all on public.suppliers       from anon;
 revoke all on public.purchase_orders from anon;
 revoke all on public.deliveries      from anon;
 revoke all on public.payments        from anon;
+revoke all on public.cash_movements  from anon;
 
 revoke all on public.products        from authenticated;
 revoke all on public.transactions    from authenticated;
@@ -336,6 +380,7 @@ revoke all on public.suppliers       from authenticated;
 revoke all on public.purchase_orders from authenticated;
 revoke all on public.deliveries      from authenticated;
 revoke all on public.payments        from authenticated;
+revoke all on public.cash_movements  from authenticated;
 
 -- Exactly the four verbs the sync layer uses. No TRUNCATE, no TRIGGER, no REFERENCES.
 grant select, insert, update, delete on public.products        to authenticated;
@@ -344,6 +389,7 @@ grant select, insert, update, delete on public.suppliers       to authenticated;
 grant select, insert, update, delete on public.purchase_orders to authenticated;
 grant select, insert, update, delete on public.deliveries      to authenticated;
 grant select, insert, update, delete on public.payments        to authenticated;
+grant select, insert, update, delete on public.cash_movements  to authenticated;
 
 -- ---------------------------------------------------------------------------
 -- Realtime
@@ -360,7 +406,7 @@ declare
 begin
   foreach t in array array[
     'products', 'transactions', 'suppliers',
-    'purchase_orders', 'deliveries', 'payments'
+    'purchase_orders', 'deliveries', 'payments', 'cash_movements'
   ]
   loop
     if not exists (

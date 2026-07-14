@@ -158,6 +158,7 @@ const CAPABILITIES: Record<Capability, Role[]> = {
   'manage-products': ['admin'],
   void: ['admin'],
   'manage-staff': ['admin'],
+  'view-kassa': ['admin'],
 }
 
 export const can = (role: Role, cap: Capability): boolean => CAPABILITIES[cap].includes(role)

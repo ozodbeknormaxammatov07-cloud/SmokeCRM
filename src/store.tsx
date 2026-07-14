@@ -9,10 +9,11 @@ import {
 } from 'react'
 import { initDb, watchProducts, watchRecentTransactions, watchSuppliers } from './lib/db'
 import { watchDeliveries, watchPayments, watchPurchaseOrders } from './lib/procurement'
+import { watchCashMovements } from './lib/kassa'
 import { startAutoSync } from './lib/sync'
 import { hasAnyAccount, getAccount, login as authLogin, createAccount } from './lib/auth'
 import type {
-  Product, Transaction, Supplier, Role, Delivery, Payment, PurchaseOrder, Account,
+  Product, Transaction, Supplier, Role, Delivery, Payment, PurchaseOrder, Account, CashMovement,
 } from './lib/types'
 
 const BASE_BRANDS = ['UzBat', 'Parliament', 'Winston', 'Esse']
@@ -31,6 +32,7 @@ interface Store {
   deliveries: Delivery[]
   payments: Payment[]
   orders: PurchaseOrder[]
+  movements: CashMovement[]
   brands: string[]
   /** The signed-in account, or null when the login screen should show. */
   account: Account | null
@@ -58,6 +60,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [deliveries, setDeliveries] = useState<Delivery[]>([])
   const [payments, setPayments] = useState<Payment[]>([])
   const [orders, setOrders] = useState<PurchaseOrder[]>([])
+  const [movements, setMovements] = useState<CashMovement[]>([])
   const [account, setAccount] = useState<Account | null>(null)
   const [needsSetup, setNeedsSetup] = useState(false)
   const [toasts, setToasts] = useState<{ id: number; msg: string; kind: 'ok' | 'err' }[]>([])
@@ -108,6 +111,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           watchDeliveries(setDeliveries),
           watchPayments(setPayments),
           watchPurchaseOrders(setOrders),
+          watchCashMovements(setMovements),
           // Cloud sync: pushes local writes to Supabase and pulls other devices' writes. If no
           // Supabase account is signed in (or the network is down) it's a no-op and the till
           // keeps working entirely on the local database.
@@ -152,7 +156,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     : { name: '', role: 'cashier' }
 
   const value: Store = {
-    ready, error, products, recent, suppliers, deliveries, payments, orders,
+    ready, error, products, recent, suppliers, deliveries, payments, orders, movements,
     brands, account, needsSetup, actor, login, logout, createFirstAdmin, toast, toasts,
   }
 

@@ -7,7 +7,7 @@ import { outstandingLines } from '../lib/payables'
 import { money, num, parseNum, isoDay, startOfDay } from '../lib/format'
 import { stockLevel } from '../lib/analytics'
 import { Page, StockBadge, Empty } from './ui'
-import type { CartLine, Product, TxType } from '../lib/types'
+import type { CartLine, Product, TxType, SalePaymentMethod } from '../lib/types'
 
 interface Props {
   type: TxType
@@ -38,6 +38,8 @@ export default function Counter({ type }: Props) {
   const [firmId, setFirmId] = useState('')
   const [docNumber, setDocNumber] = useState('')
   const [deliveredDay, setDeliveredDay] = useState(isoDay(Date.now()))
+  // Sale payment method. Only relevant for SALE; RESTOCK ignores it.
+  const [salePay, setSalePay] = useState<SalePaymentMethod>('cash')
   // How the delivery is paid for. 'owe' leaves a debt (the original behaviour); the others
   // settle the whole delivery on the spot, in the same write. See createDelivery's `settle`.
   const [payType, setPayType] = useState<'owe' | 'cash' | 'card'>('owe')
@@ -201,10 +203,12 @@ export default function Counter({ type }: Props) {
         return
       }
 
-      const res = await commitCart(type, lines, actor, note.trim())
+      // `salePay` is ignored by commitCart for a RESTOCK, so passing it is harmless there.
+      const res = await commitCart(type, lines, actor, note.trim(), salePay)
+      const payLabel = { cash: 'Naqd', card: 'Plastik', click: 'Click' }[salePay]
       toast(
         isSale
-          ? `Sotuv saqlandi — ${money(res.total)} (foyda ${money(res.profit)})`
+          ? `Sotuv saqlandi (${payLabel}) — ${money(res.total)} (foyda ${money(res.profit)})`
           : `Kirim saqlandi — ${money(res.total)}`,
       )
       clearCart()
@@ -468,6 +472,28 @@ export default function Counter({ type }: Props) {
                     </div>
                   </>
                 )}
+              </div>
+            )}
+
+            {isSale && (
+              <div>
+                <label className="label">To'lov turi</label>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {([
+                    ['cash', 'Naqd'],
+                    ['card', 'Plastik'],
+                    ['click', 'Click'],
+                  ] as const).map(([key, label]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => setSalePay(key)}
+                      className={`btn h-9 text-xs ${salePay === key ? 'btn-primary' : 'btn-ghost'}`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
 

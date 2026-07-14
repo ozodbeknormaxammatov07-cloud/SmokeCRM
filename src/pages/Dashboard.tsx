@@ -6,6 +6,7 @@ import { totals, bestSellers, reorderList, inventoryValue, stockLevel } from '..
 import {
   supplierBalance, unpaidDeliveries, forSupplier, orderStatus,
 } from '../lib/payables'
+import { drawerBalance } from '../lib/kassa'
 import { money, moneyShort, num, pct, startOfDay, endOfDay, isoDay, daysAgo, dateTimeLabel } from '../lib/format'
 import { Page, Kpi, StockBadge } from '../components/ui'
 import { BestSellersChart } from '../components/charts'
@@ -20,7 +21,7 @@ const RANGES = [
 ] as const
 
 export default function Dashboard() {
-  const { products, recent, suppliers, deliveries, payments, orders } = useStore()
+  const { products, recent, suppliers, deliveries, payments, orders, movements } = useStore()
   const [rangeKey, setRangeKey] = useState<(typeof RANGES)[number]['key']>('today')
   const [txs, setTxs] = useState<Transaction[]>([])
 
@@ -108,11 +109,19 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* Payables. Hidden until there is at least one firm, so a shop that doesn't buy on
-          credit never sees three widgets reading zero. */}
-      {!!suppliers.length && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mt-3 sm:mt-4">
-          <Link to="/firmalar" className="contents">
+      {/* Payables + cash drawer. The drawer always shows (the dashboard is admin-only anyway);
+          the firm tiles appear only once there's a firm, so a cash-only shop sees no dead tiles. */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mt-3 sm:mt-4">
+        <Link to="/kassa" className="contents">
+          <Kpi
+            label="Kassada naqd"
+            value={moneyShort(drawerBalance(recent, payments, movements))}
+            sub="hozirgi qoldiq"
+          />
+        </Link>
+        {!!suppliers.length && (
+          <>
+            <Link to="/firmalar" className="contents">
             <Kpi
               label="Firmalarga qarz"
               value={moneyShort(payables.totalDebt)}
@@ -126,15 +135,16 @@ export default function Dashboard() {
               tone={payables.overdueCount ? 'bad' : payables.totalDebt ? 'warn' : 'good'}
             />
           </Link>
-          <Link to="/buyurtmalar" className="contents">
-            <Kpi
-              label="Kutilayotgan yetkazib berish"
-              value={`${num(payables.incoming)} ta`}
-              sub="shu hafta ichida"
-            />
-          </Link>
-        </div>
-      )}
+            <Link to="/buyurtmalar" className="contents">
+              <Kpi
+                label="Kutilayotgan yetkazib berish"
+                value={`${num(payables.incoming)} ta`}
+                sub="shu hafta ichida"
+              />
+            </Link>
+          </>
+        )}
+      </div>
 
       <div className="grid lg:grid-cols-2 gap-4 mt-4">
         <section className="card p-4">

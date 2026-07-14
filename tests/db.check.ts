@@ -161,6 +161,21 @@ async function main() {
   try { await restoreBackup({ nope: true } as never) } catch (e) { bad = e }
   ok('garbage backup file refused', bad instanceof Error)
 
+  console.log('\n=== a sale records its payment method ===')
+  const payProd = await createProduct({
+    name: 'Marlboro', brand: 'Marlboro', cost_price: 22000, selling_price: 28000,
+    current_stock: 20, reorder_threshold: 5, active: true,
+  }, ACTOR)
+  await commitCart('SALE', [line(await byId(payProd), 2)], ACTOR, '', 'card')
+  await commitCart('SALE', [line(await byId(payProd), 1)], ACTOR)   // default -> cash
+  // Order-independent: both sales can share a millisecond ts, so assert the set of methods
+  // rather than "the latest is cash".
+  const methods = (await fetchAllTransactions())
+    .filter((t) => t.product_id === payProd && t.type === 'SALE')
+    .map((t) => t.payment_method)
+    .sort()
+  eq('the explicit method and the default (cash) are both recorded', methods, ['card', 'cash'])
+
   console.log('\n=== resetAllData wipes the business stores ===')
   ok('there is data to wipe', (await fetchAllTransactions()).length > 0 && (await products()).length > 0)
   await resetAllData()

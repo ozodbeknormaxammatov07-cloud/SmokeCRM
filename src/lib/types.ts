@@ -58,6 +58,8 @@ export interface Transaction {
   voided?: boolean
   void_of?: string
   reversal_of?: string
+  /** How a SALE was paid. Unset on RESTOCK and on sales made before this feature. */
+  payment_method?: SalePaymentMethod
 }
 
 /**
@@ -85,6 +87,30 @@ export interface Supplier {
 }
 
 export type PaymentMethod = 'cash' | 'bank' | 'card' | 'other'
+
+/** How a customer paid for a sale. Only 'cash' touches the cash drawer (Kassa). */
+export type SalePaymentMethod = 'cash' | 'card' | 'click'
+
+export type CashMovementKind = 'deposit' | 'expense' | 'withdrawal' | 'correction'
+
+/**
+ * Manual cash into or out of the drawer — anything that isn't a sale or a firm payment.
+ * Append-only; corrected by an opposite-signed twin, exactly like a Payment.
+ */
+export interface CashMovement {
+  id: string
+  ts: number                 // when it happened; user-visible, drives ordering
+  created_at: number         // write time; the sync watermark
+  /** Signed: positive adds to the drawer, negative removes it. */
+  amount: number
+  kind: CashMovementKind
+  reason: string
+  note?: string
+  user_name: string
+  user_role: Role
+  voided?: boolean
+  reversal_of?: string
+}
 
 /** Derived from the deliveries — except `cancelled`, which is a human decision. */
 export type OrderStatus = 'waiting' | 'partial' | 'received' | 'overdue' | 'cancelled'
@@ -206,6 +232,7 @@ export type Capability =
   | 'manage-products'
   | 'void'
   | 'manage-staff'
+  | 'view-kassa'
 
 export type NewProduct = Omit<Product, 'id' | 'created_at' | 'updated_at'>
 
