@@ -7,7 +7,7 @@
  */
 
 export const DB_NAME = 'tamaki-savdo'
-const DB_VERSION = 2
+const DB_VERSION = 3
 
 export const STORES = {
   products: 'products',
@@ -16,6 +16,7 @@ export const STORES = {
   purchase_orders: 'purchase_orders',
   deliveries: 'deliveries',
   payments: 'payments',
+  users: 'users',
 } as const
 
 export type StoreName = (typeof STORES)[keyof typeof STORES]
@@ -62,6 +63,12 @@ export function openDb(): Promise<IDBDatabase> {
         const s = db.createObjectStore(STORES.payments, { keyPath: 'id' })
         s.createIndex('supplier_id', 'supplier_id')
         s.createIndex('created_at', 'created_at')
+      }
+
+      // v3 — staff accounts. Guarded like the rest, so upgrading keeps every existing row.
+      if (!db.objectStoreNames.contains(STORES.users)) {
+        const s = db.createObjectStore(STORES.users, { keyPath: 'id' })
+        s.createIndex('name', 'name')
       }
     }
 

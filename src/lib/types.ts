@@ -180,6 +180,33 @@ export interface User {
   role: Role
 }
 
+/** A staff login. Password is stored only as a PBKDF2 hash + per-account salt (both base64). */
+export interface Account {
+  id: string
+  /** The login handle. Unique case-insensitively. */
+  name: string
+  role: Role
+  salt: string
+  password_hash: string
+  created_at: number
+  updated_at: number
+  /** Soft delete: a removed cashier can't log in, but their name stays on past ledger rows. */
+  deleted_at?: number
+}
+
+/**
+ * A gated ability. Every one is admin-only today; the map in auth.ts is the single place that
+ * decides, so widening a capability to cashiers later is one edit, not a hunt through the UI.
+ */
+export type Capability =
+  | 'view-dashboard'
+  | 'receive-stock'
+  | 'view-firms'
+  | 'view-reports'
+  | 'manage-products'
+  | 'void'
+  | 'manage-staff'
+
 export type NewProduct = Omit<Product, 'id' | 'created_at' | 'updated_at'>
 
 export interface CartLine {
