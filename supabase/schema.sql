@@ -350,13 +350,27 @@ grant select, insert, update, delete on public.payments        to authenticated;
 -- ---------------------------------------------------------------------------
 -- Devices hear each other's writes instead of polling for them. Realtime honours RLS, so a
 -- device is only ever notified about its own shop's rows.
-
-alter publication supabase_realtime add table public.products;
-alter publication supabase_realtime add table public.transactions;
-alter publication supabase_realtime add table public.suppliers;
-alter publication supabase_realtime add table public.purchase_orders;
-alter publication supabase_realtime add table public.deliveries;
-alter publication supabase_realtime add table public.payments;
+--
+-- `alter publication ... add table` errors if the table is already a member, so re-running the
+-- whole schema would fail on the tables added the first time round. Guard each add with a
+-- membership check so the file stays safe to run start to finish, however many times.
+do $$
+declare
+  t text;
+begin
+  foreach t in array array[
+    'products', 'transactions', 'suppliers',
+    'purchase_orders', 'deliveries', 'payments'
+  ]
+  loop
+    if not exists (
+      select 1 from pg_publication_tables
+      where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = t
+    ) then
+      execute format('alter publication supabase_realtime add table public.%I', t);
+    end if;
+  end loop;
+end $$;
 
 -- ---------------------------------------------------------------------------
 -- stock_levels — what the shelf actually holds
