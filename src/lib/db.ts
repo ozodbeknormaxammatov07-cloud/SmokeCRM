@@ -540,6 +540,131 @@ export async function restoreBackup(b: Backup): Promise<{
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Sync: snapshot out, merge in                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Everything this device holds, tombstones included. `exportBackup` hides deleted products
+ * because a human reading a backup shouldn't see them; sync must see them, or a deletion made
+ * here would never reach the other device.
+ */
+export interface SyncSnapshot {
+  products: Product[]
+  transactions: Transaction[]
+  suppliers: Supplier[]
+  purchase_orders: PurchaseOrder[]
+  deliveries: Delivery[]
+  payments: Payment[]
+}
+
+export async function snapshotForSync(): Promise<SyncSnapshot> {
+  return tx(BACKUP_STORES, 'readonly', async (t) => ({
+    products: await getAll<Product>(t, STORES.products),
+    transactions: await getAll<Transaction>(t, STORES.transactions),
+    suppliers: await getAll<Supplier>(t, STORES.suppliers),
+    purchase_orders: await getAll<PurchaseOrder>(t, STORES.purchase_orders),
+    deliveries: await getAll<Delivery>(t, STORES.deliveries),
+    payments: await getAll<Payment>(t, STORES.payments),
+  }))
+}
+
+/**
+ * Merges rows from another device into this one. Returns how many rows actually changed, so
+ * a no-op sync doesn't wake the whole UI up.
+ *
+ * The merge rules are what make two devices safe to run at once:
+ *
+ * - Transactions are append-only and immutable, so an id that already exists is the same row.
+ *   The one mutable bit is `voided`, and it only ever goes false -> true — so it merges with
+ *   OR. Last-write-wins on a void would let a stale device un-cancel a cancelled sale.
+ *
+ * - Products are last-write-wins on `updated_at`. A tombstone is just another update, so a
+ *   delete propagates like any other edit rather than by absence.
+ *
+ * - `current_stock` on an incoming product is IGNORED. It's a cache of that device's view of
+ *   the ledger, and this device's ledger is about to differ. Stock is recomputed from the
+ *   merged rows instead, which is the whole reason it's derived.
+ *
+ * - Deliveries and payments are MONEY, so they follow the transaction rules exactly: append-only,
+ *   with `voided` merging by OR. Orders are intentions, not money, so they follow the product
+ *   rules: last-write-wins with a tombstone.
+ */
+export async function mergeRemote(remote: SyncSnapshot): Promise<number> {
+  let changed = 0
+
+  await tx(BACKUP_STORES, 'readwrite', async (t) => {
+    const touched = new Set<string>()
+
+    for (const r of remote.transactions) {
+      const cur = await get<Transaction>(t, STORES.transactions, r.id)
+      // Once voided, always voided — never let an older copy resurrect a cancelled sale.
+      const voided = Boolean(cur?.voided) || Boolean(r.voided)
+      if (cur && Boolean(cur.voided) === voided) continue
+
+      await put(t, STORES.transactions, { ...r, voided })
+      touched.add(r.product_id)
+      changed++
+    }
+
+    for (const r of remote.products) {
+      const cur = await get<Product>(t, STORES.products, r.id)
+      if (cur && (cur.updated_at ?? 0) >= (r.updated_at ?? 0)) continue
+
+      // Keep OUR stock cache; it is rebuilt from the ledger below regardless.
+      await put(t, STORES.products, { ...r, current_stock: cur?.current_stock ?? 0 })
+      touched.add(r.id)
+      changed++
+    }
+
+    for (const r of remote.suppliers ?? []) {
+      const cur = await get<Supplier>(t, STORES.suppliers, r.id)
+      if (cur && (cur.updated_at ?? 0) >= (r.updated_at ?? 0)) continue
+      await put(t, STORES.suppliers, r)
+      changed++
+    }
+
+    // An order is a mutable intention, not money: last-write-wins, exactly like a product.
+    // A lost concurrent edit to an order is annoying; it cannot corrupt a balance.
+    for (const r of remote.purchase_orders ?? []) {
+      const cur = await get<PurchaseOrder>(t, STORES.purchase_orders, r.id)
+      if (cur && (cur.updated_at ?? 0) >= (r.updated_at ?? 0)) continue
+      await put(t, STORES.purchase_orders, r)
+      changed++
+    }
+
+    // Deliveries and payments ARE money, so they get the ledger treatment: append-only, so an
+    // id that already exists is the same row. The one mutable bit is `voided`, and it only ever
+    // goes false -> true — hence OR. Last-write-wins on a void would let a stale device
+    // un-cancel a cancelled delivery and silently re-create a debt the shop already settled.
+    for (const r of remote.deliveries ?? []) {
+      const cur = await get<Delivery>(t, STORES.deliveries, r.id)
+      const voided = Boolean(cur?.voided) || Boolean(r.voided)
+      if (cur && Boolean(cur.voided) === voided) continue
+
+      await put(t, STORES.deliveries, { ...r, voided })
+      // A delivery carries stock as well as debt, so its products need recomputing too.
+      for (const l of r.lines ?? []) touched.add(l.product_id)
+      changed++
+    }
+
+    for (const r of remote.payments ?? []) {
+      const cur = await get<Payment>(t, STORES.payments, r.id)
+      const voided = Boolean(cur?.voided) || Boolean(r.voided)
+      if (cur && Boolean(cur.voided) === voided) continue
+
+      await put(t, STORES.payments, { ...r, voided })
+      changed++
+    }
+
+    // Any product whose ledger or record moved gets its stock rebuilt from the merged truth.
+    for (const pid of touched) await recomputeStock(t, pid)
+  })
+
+  if (changed) notify()
+  return changed
+}
+
 /** Confirms the browser can actually persist. Called once at startup. */
 export async function initDb(): Promise<void> {
   await openDb()

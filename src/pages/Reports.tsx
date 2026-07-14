@@ -11,6 +11,7 @@ import {
 } from '../lib/format'
 import { Page, Kpi, MarginChip } from '../components/ui'
 import { TrendChart, BrandChart } from '../components/charts'
+import CloudBackup from '../components/CloudBackup'
 import type { Transaction } from '../lib/types'
 
 const PRESETS = [
@@ -246,6 +247,8 @@ export default function Reports() {
           <HistoryTable txs={txs} onVoid={doVoid} />
         )}
       </div>
+
+      <CloudBackup />
     </Page>
   )
 }
