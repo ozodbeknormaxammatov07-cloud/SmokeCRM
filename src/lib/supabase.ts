@@ -8,8 +8,14 @@ import { createClient, type SupabaseClient, type Session } from '@supabase/supab
  * The publishable key is safe in the bundle: it grants no access on its own. Row-level
  * security is what protects the data — every table is restricted to `user_id = auth.uid()`.
  */
-const url = import.meta.env.VITE_SUPABASE_URL as string | undefined
-const key = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined
+// These fall back to the shop's Supabase project when no build-time env var is set. Both are
+// safe to ship in the browser bundle by design (see .env.example): the publishable key grants
+// no access on its own — row-level security is what protects the data. Setting the matching
+// VITE_* env var in the host overrides these.
+const url = (import.meta.env.VITE_SUPABASE_URL as string | undefined)
+  ?? 'https://oxjljygjcdbndunnkrzo.supabase.co'
+const key = (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined)
+  ?? 'sb_publishable_yzQPh820AgXLrb8uC9uyzw_JyVXaeKN'
 
 export const cloudConfigured = Boolean(url && key)
 
