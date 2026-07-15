@@ -14,6 +14,7 @@ import Orders from './pages/Orders'
 import Staff from './pages/Staff'
 import Kassa from './pages/Kassa'
 import Login from './pages/Login'
+import ShopLogin from './pages/ShopLogin'
 import type { Capability } from './lib/types'
 
 const NAV: { to: string; label: string; icon: string; end?: boolean; cap?: Capability }[] = [
@@ -35,18 +36,29 @@ function RequireCap({ cap, children }: { cap: Capability; children: JSX.Element 
 }
 
 export default function App() {
-  const { ready, error, account, needsSetup, actor, logout } = useStore()
+  const { ready, error, account, needsSetup, actor, logout, shopResolved, shopSignedIn } = useStore()
+
+  // Before anything else: is a shop signed in? This is the one cloud login the whole app hangs
+  // off — no session means no data, so show the shop-login screen.
+  if (!shopResolved) {
+    return (
+      <div className="min-h-screen grid place-items-center">
+        <div className="w-8 h-8 border-2 border-ink-200 border-t-ink-900 rounded-full animate-spin" />
+      </div>
+    )
+  }
+  if (!shopSignedIn) return <ShopLogin />
 
   if (error) {
     return (
       <div className="min-h-screen grid place-items-center p-6">
         <div className="card p-6 max-w-md text-center">
           <div className="text-3xl mb-3">⚠️</div>
-          <h1 className="font-semibold mb-1">Ma'lumotlar bazasini ochib bo'lmadi</h1>
+          <h1 className="font-semibold mb-1">Bulutga ulanib bo'lmadi</h1>
           <p className="text-sm text-ink-500">{error}</p>
           <p className="text-xs text-ink-400 mt-3">
-            Brauzer maxfiy (inkognito) rejimda bo'lsa yoki saytlar uchun ma'lumot
-            saqlash o'chirilgan bo'lsa shunday bo'ladi. Oddiy oynada oching.
+            Internet aloqasini tekshiring va sahifani qayta yuklang. Ma'lumot bulutda
+            saqlanadi — ishlash uchun internet kerak.
           </p>
         </div>
       </div>

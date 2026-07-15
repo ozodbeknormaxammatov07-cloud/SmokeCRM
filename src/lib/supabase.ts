@@ -12,10 +12,11 @@ import { createClient, type SupabaseClient, type Session } from '@supabase/supab
 // safe to ship in the browser bundle by design (see .env.example): the publishable key grants
 // no access on its own — row-level security is what protects the data. Setting the matching
 // VITE_* env var in the host overrides these.
-const url = (import.meta.env.VITE_SUPABASE_URL as string | undefined)
-  ?? 'https://oxjljygjcdbndunnkrzo.supabase.co'
-const key = (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined)
-  ?? 'sb_publishable_yzQPh820AgXLrb8uC9uyzw_JyVXaeKN'
+// `import.meta.env` is defined by Vite in the browser build but is absent when a check suite is
+// bundled for Node, so read it defensively — the hardcoded fallbacks then apply.
+const env = (import.meta as { env?: Record<string, string | undefined> }).env
+const url = env?.VITE_SUPABASE_URL ?? 'https://oxjljygjcdbndunnkrzo.supabase.co'
+const key = env?.VITE_SUPABASE_PUBLISHABLE_KEY ?? 'sb_publishable_yzQPh820AgXLrb8uC9uyzw_JyVXaeKN'
 
 export const cloudConfigured = Boolean(url && key)
 

@@ -1,5 +1,6 @@
 import {
   STORES, tx, get, put, getAll, getAllByRange, subscribe, notify, newId, openDb, DB_NAME,
+  clearAllStores, bulkPut, type Txn,
 } from './idb'
 import type {
   Product, NewProduct, Transaction, TxType, Supplier, CartLine, User,
@@ -52,7 +53,7 @@ const stockDelta = (t: Transaction): number => (t.type === 'SALE' ? -t.quantity 
  * Must be called inside a transaction that already covers both stores, so the recomputed
  * value cannot be read between the ledger write and the cache update.
  */
-export async function recomputeStock(t: IDBTransaction, productId: string): Promise<number> {
+export async function recomputeStock(t: Txn, productId: string): Promise<number> {
   const rows = await getAllByRange<Transaction>(
     t, STORES.transactions, 'product_id', IDBKeyRange.only(productId),
   )
@@ -504,28 +505,16 @@ const BACKUP_STORES = [
 ]
 
 /**
- * Wipes every business store on this device — products, the whole ledger, firms, orders,
- * deliveries, payments — leaving staff accounts (the `users` store) untouched so the admin
- * doing the reset stays signed in.
+ * Wipes every business store — products, the whole ledger, firms, orders, deliveries,
+ * payments — leaving staff accounts (the `users` store) untouched so the admin doing the reset
+ * stays signed in.
  *
- * Destructive and irreversible: callers MUST confirm first. Intended for "start a fresh test",
- * so it deliberately does not export a backup first.
- *
- * Note on cloud sync: this clears only the LOCAL data. A device still signed into the shop's
- * Supabase account will re-pull whatever is in the cloud on the next sync — so a true fresh
- * start also means clearing the cloud (or signing out of it) first.
+ * Destructive and irreversible, and it clears the shared cloud database for the WHOLE shop, not
+ * just this device: callers MUST confirm first. Intended for "start a fresh test", so it
+ * deliberately does not export a backup first.
  */
 export async function resetAllData(): Promise<void> {
-  await tx(BACKUP_STORES, 'readwrite', async (t) => {
-    for (const s of BACKUP_STORES) {
-      await new Promise<void>((res, rej) => {
-        const r = t.objectStore(s).clear()
-        r.onsuccess = () => res()
-        r.onerror = () => rej(r.error)
-      })
-    }
-  })
-  notify()
+  await clearAllStores(BACKUP_STORES)
 }
 
 /**
@@ -546,24 +535,15 @@ export async function restoreBackup(b: Backup): Promise<{
     throw new Error("Bu fayl zaxira nusxa emas (noto'g'ri format)")
   }
 
-  await tx(BACKUP_STORES, 'readwrite', async (t) => {
-    for (const s of BACKUP_STORES) {
-      await new Promise<void>((res, rej) => {
-        const r = t.objectStore(s).clear()
-        r.onsuccess = () => res()
-        r.onerror = () => rej(r.error)
-      })
-    }
-    for (const p of b.products) await put(t, STORES.products, p)
-    for (const x of b.transactions) await put(t, STORES.transactions, x)
-    for (const s of b.suppliers ?? []) await put(t, STORES.suppliers, s)
-    for (const o of b.purchase_orders ?? []) await put(t, STORES.purchase_orders, o)
-    for (const d of b.deliveries ?? []) await put(t, STORES.deliveries, d)
-    for (const p of b.payments ?? []) await put(t, STORES.payments, p)
-    for (const m of b.cash_movements ?? []) await put(t, STORES.cash_movements, m)
-  })
+  await clearAllStores(BACKUP_STORES)
+  await bulkPut(STORES.products, b.products)
+  await bulkPut(STORES.transactions, b.transactions)
+  await bulkPut(STORES.suppliers, b.suppliers ?? [])
+  await bulkPut(STORES.purchase_orders, b.purchase_orders ?? [])
+  await bulkPut(STORES.deliveries, b.deliveries ?? [])
+  await bulkPut(STORES.payments, b.payments ?? [])
+  await bulkPut(STORES.cash_movements, b.cash_movements ?? [])
 
-  notify()
   return {
     products: b.products.length,
     transactions: b.transactions.length,

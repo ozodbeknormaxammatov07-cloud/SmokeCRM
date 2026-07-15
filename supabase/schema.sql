@@ -1,24 +1,22 @@
--- Tamaki Savdo / SmokeCRM — multi-device sync schema.
+-- Tamaki Savdo / SmokeCRM — cloud database schema.
 --
--- Every device commits sales to its own IndexedDB first, so the till keeps working with the
--- wifi down. These tables are the meeting point: each device pushes what it wrote and pulls
--- what the others wrote. There is no stock guard and no business logic here — the till already
--- enforces that, and a second copy of the rules would drift out of step with the first.
+-- This is the single source of truth. Every device holds an in-memory mirror that hydrates from
+-- these tables on sign-in and writes straight back; Supabase Realtime keeps every device live.
+-- There is no stock guard and no business logic here — the till enforces that, and a second copy
+-- of the rules would drift out of step with the first.
 --
 -- All staff sign into the SAME shop account, so `user_id` identifies the shop, not the person.
 -- Who rang up a sale is recorded on the ledger row itself (`user_name`).
 --
--- Two devices are safe to run at once because of the shape of the data, not because of locks:
+-- The shape of the data still matters, because two devices can write at the same instant:
 --
 --   * The ledger is append-only with UUID keys — a grow-only set. Two devices appending sales
---     cannot overwrite each other, in any order, online or off. Merging is an idempotent
---     upsert, which is also what makes retry-after-offline safe.
---   * Stock is DERIVED from that ledger by each device, never stored here. A stored counter is
---     a lost-update race: both devices read 10, both sell 3, one write wins, and the shop has
---     sold 6 packets but decremented 3. A sum has no such race.
---   * Deletes are TOMBSTONES (`deleted_at`), never row removals. "It's missing, so delete it"
---     cannot tell a deletion apart from a row the other device just created — and guessing
---     wrong destroys the other device's work.
+--     cannot overwrite each other, in any order. Merging is an idempotent upsert.
+--   * Stock is DERIVED from that ledger, never stored here. A stored counter is a lost-update
+--     race: both devices read 10, both sell 3, one write wins, and the shop has sold 6 packets
+--     but decremented 3. A sum has no such race.
+--   * Deletes are TOMBSTONES (`deleted_at`), never row removals — kept from the previous design
+--     so a restored backup and the derived views behave identically to before.
 
 create extension if not exists pgcrypto;
 
@@ -472,3 +470,61 @@ create or replace view public.firm_balances with (security_invoker = true) as
 
 revoke all on public.firm_balances from anon;
 grant select on public.firm_balances to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- Staff (xodimlar)
+-- ---------------------------------------------------------------------------
+-- The people who ring up sales. This is NOT Supabase auth: the whole shop signs into ONE
+-- Supabase account (the "shop account"), and staff are names + PINs stored under that account,
+-- so an admin adds a cashier once and every device sees them. `user_id` identifies the shop.
+--
+-- The password is a PBKDF2 hash + per-account salt, exactly as it was when these lived in the
+-- browser. It is a UX gate on a trusted till, not server-enforced identity — any device signed
+-- into the shop account can read this table, just as anyone with dev-tools could read the old
+-- IndexedDB copy. RLS keeps it scoped to the one shop; that is the right level for a POS.
+create table if not exists public.staff (
+  user_id       uuid not null references auth.users(id) on delete cascade,
+  id            text not null,
+  name          text not null,
+  role          text not null default 'cashier' check (role in ('admin','cashier')),
+  salt          text not null,
+  password_hash text not null,
+  created_at    bigint,
+  updated_at    bigint,
+  deleted_at    bigint,   -- tombstone: a removed cashier can't log in, but their name stays on past rows
+  synced_at     timestamptz not null default now(),
+  primary key (user_id, id)
+);
+
+create index if not exists staff_user_updated_idx on public.staff (user_id, updated_at);
+
+alter table public.staff enable row level security;
+
+drop policy if exists staff_select on public.staff;
+drop policy if exists staff_insert on public.staff;
+drop policy if exists staff_update on public.staff;
+drop policy if exists staff_delete on public.staff;
+
+create policy staff_select on public.staff
+  for select to authenticated using ((select auth.uid()) = user_id);
+create policy staff_insert on public.staff
+  for insert to authenticated with check ((select auth.uid()) = user_id);
+create policy staff_update on public.staff
+  for update to authenticated
+  using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
+create policy staff_delete on public.staff
+  for delete to authenticated using ((select auth.uid()) = user_id);
+
+revoke all on public.staff from anon;
+revoke all on public.staff from authenticated;
+grant select, insert, update, delete on public.staff to authenticated;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'staff'
+  ) then
+    alter publication supabase_realtime add table public.staff;
+  end if;
+end $$;

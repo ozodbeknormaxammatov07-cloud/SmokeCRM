@@ -7,11 +7,12 @@ import {
   useCallback,
   type ReactNode,
 } from 'react'
-import { initDb, watchProducts, watchRecentTransactions, watchSuppliers } from './lib/db'
+import { watchProducts, watchRecentTransactions, watchSuppliers } from './lib/db'
 import { watchDeliveries, watchPayments, watchPurchaseOrders } from './lib/procurement'
 import { watchCashMovements } from './lib/kassa'
-import { startAutoSync } from './lib/sync'
+import { startCloud, stopCloud } from './lib/idb'
 import { hasAnyAccount, getAccount, login as authLogin, createAccount } from './lib/auth'
+import { supabase, currentSession, signOut, type Session } from './lib/supabase'
 import type {
   Product, Transaction, Supplier, Role, Delivery, Payment, PurchaseOrder, Account, CashMovement,
 } from './lib/types'
@@ -34,11 +35,19 @@ interface Store {
   orders: PurchaseOrder[]
   movements: CashMovement[]
   brands: string[]
-  /** The signed-in account, or null when the login screen should show. */
+  /** True once the shop (Supabase) session has been checked — before this, show a spinner. */
+  shopResolved: boolean
+  /** True when the shop account is signed in. When false, the whole app is the shop-login screen. */
+  shopSignedIn: boolean
+  /** The signed-in shop account's email, for the account panel. */
+  shopEmail: string | null
+  /** Signs the whole shop out (and the current staff member with it). */
+  signOutShop: () => Promise<void>
+  /** The signed-in staff member, or null when the staff-login screen should show. */
   account: Account | null
-  /** True when the shop has no accounts yet — show the create-first-admin screen. */
+  /** True when the shop has no staff yet — show the create-first-admin screen. */
   needsSetup: boolean
-  /** Who stamps each ledger write. Derived from the signed-in account. */
+  /** Who stamps each ledger write. Derived from the signed-in staff member. */
   actor: Actor
   login: (name: string, password: string) => Promise<boolean>
   logout: () => void
@@ -52,6 +61,8 @@ const Ctx = createContext<Store | null>(null)
 const SESSION_KEY = 'ts.session'
 
 export function StoreProvider({ children }: { children: ReactNode }) {
+  const [shopSession, setShopSession] = useState<Session | null>(null)
+  const [shopResolved, setShopResolved] = useState(false)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [products, setProducts] = useState<Product[]>([])
@@ -88,60 +99,91 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return true
   }, [])
 
+  const signOutShop = useCallback(async () => {
+    // Drop the staff actor as well, so the next shop to sign in starts at its own staff login.
+    localStorage.removeItem(SESSION_KEY)
+    setAccount(null)
+    await signOut()
+  }, [])
+
   const toast = useCallback((msg: string, kind: 'ok' | 'err' = 'ok') => {
     const id = Date.now() + Math.random()
     setToasts((t) => [...t, { id, msg, kind }])
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4000)
   }, [])
 
+  // Resolve and then track the shop (Supabase) session. This is the ONE cloud login — everyone
+  // who signs in here sees the same data. Staff names + PINs live underneath it.
   useEffect(() => {
+    let cancelled = false
+    void currentSession().then((s) => {
+      if (cancelled) return
+      setShopSession(s)
+      setShopResolved(true)
+    })
+    const sub = supabase?.auth.onAuthStateChange((_e, s) => {
+      setShopSession(s)
+      setShopResolved(true)
+    })
+    return () => { cancelled = true; sub?.data.subscription.unsubscribe() }
+  }, [])
+
+  const uid = shopSession?.user.id ?? null
+
+  // With a shop signed in: load the whole shop into memory once, open the live views, and
+  // resolve who (which staff member) is at the till. Signing out tears all of that down.
+  useEffect(() => {
+    if (!uid) {
+      setReady(false)
+      setProducts([]); setRecent([]); setSuppliers([]); setDeliveries([])
+      setPayments([]); setOrders([]); setMovements([])
+      setAccount(null); setNeedsSetup(false); setError(null)
+      void stopCloud()
+      return
+    }
+
     let stops: (() => void)[] = []
     let cancelled = false
+    setReady(false)
+    setError(null)
 
-    initDb()
-      .then(() => {
+    startCloud(uid)
+      .then(async () => {
         if (cancelled) return
         stops = [
-          watchProducts((rows) => {
-            setProducts(rows)
-            setReady(true)
-          }),
+          watchProducts(setProducts),
           watchRecentTransactions(300, setRecent),
           watchSuppliers(setSuppliers),
           watchDeliveries(setDeliveries),
           watchPayments(setPayments),
           watchPurchaseOrders(setOrders),
           watchCashMovements(setMovements),
-          // Cloud sync: pushes local writes to Supabase and pulls other devices' writes. If no
-          // Supabase account is signed in (or the network is down) it's a no-op and the till
-          // keeps working entirely on the local database.
-          startAutoSync(),
         ]
 
-        // Resolve who is signed in, if anyone. A stored session id that no longer maps to a
-        // live account (deleted, or a wiped browser) falls back to the login screen.
-        void (async () => {
-          const anyAccount = await hasAnyAccount()
+        // A shop with no staff yet shows the create-first-admin screen. Otherwise restore the
+        // staff member who was last at this till, if their account still exists.
+        const anyAccount = await hasAnyAccount()
+        if (cancelled) return
+        setNeedsSetup(!anyAccount)
+        const sid = localStorage.getItem(SESSION_KEY)
+        if (sid) {
+          const a = await getAccount(sid)
           if (cancelled) return
-          setNeedsSetup(!anyAccount)
-          const sid = localStorage.getItem(SESSION_KEY)
-          if (sid) {
-            const a = await getAccount(sid)
-            if (cancelled) return
-            if (a) setAccount(a)
-            else localStorage.removeItem(SESSION_KEY)
-          }
-        })()
+          if (a) setAccount(a)
+          else localStorage.removeItem(SESSION_KEY)
+        }
+        setReady(true)
       })
-      .catch((e: Error) => {
-        if (!cancelled) setError(e.message)
+      .catch((e: unknown) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Bulutga ulanib bo\'lmadi')
       })
 
     return () => {
       cancelled = true
       stops.forEach((s) => s())
+      void stopCloud()
     }
-  }, [])
+  }, [uid])
 
   const brands = useMemo(() => {
     const set = new Set(BASE_BRANDS)
@@ -150,14 +192,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [products])
 
   // Every ledger write is stamped with whoever is signed in. The placeholder is never used: the
-  // app never renders a write path while signed out (App.tsx shows the login screen instead).
+  // app never renders a write path while signed out (App.tsx shows a login screen instead).
   const actor: Actor = account
     ? { name: account.name, role: account.role }
     : { name: '', role: 'cashier' }
 
   const value: Store = {
     ready, error, products, recent, suppliers, deliveries, payments, orders, movements,
-    brands, account, needsSetup, actor, login, logout, createFirstAdmin, toast, toasts,
+    brands, shopResolved, shopSignedIn: !!uid, shopEmail: shopSession?.user.email ?? null,
+    signOutShop, account, needsSetup, actor, login, logout, createFirstAdmin, toast, toasts,
   }
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

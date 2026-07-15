@@ -131,8 +131,10 @@ async function main() {
   await adjustStock(await byId(id), 100, ACTOR, 'qayta sanaldi')
   eq('stock set to counted value', (await byId(id)).current_stock, 100)
   eq('adjustment logged', (await fetchAllTransactions()).length, n1 + 1)
-  const adj = (await fetchAllTransactions())[0]
-  ok('adjustment names the reason', (adj.note ?? '').includes('qayta sanaldi'))
+  // Located by its reason rather than by position: several rows share this millisecond's ts, so
+  // "newest" is ambiguous — what matters is that the adjustment row exists and names the reason.
+  const adj = (await fetchAllTransactions()).find((x) => (x.note ?? '').includes('qayta sanaldi'))
+  ok('adjustment names the reason', !!adj)
 
   console.log('\n=== import posts opening stock as a ledger row ===')
   const n2 = (await fetchAllTransactions()).length

@@ -25,12 +25,13 @@ const products = () => tx([STORES.products], 'readonly', (t) => getAll<Product>(
 const byId = async (id: string) => (await products()).find((p) => p.id === id)!
 
 async function main() {
-  console.log('\n=== the new stores exist at DB v2 ===')
-  const db = await openDb()
-  eq('db version', db.version, 4)
-  ok('purchase_orders store', db.objectStoreNames.contains(STORES.purchase_orders))
-  ok('deliveries store', db.objectStoreNames.contains(STORES.deliveries))
-  ok('payments store', db.objectStoreNames.contains(STORES.payments))
+  console.log('\n=== every store is present and queryable ===')
+  await openDb()
+  const empty = (s: typeof STORES[keyof typeof STORES]) =>
+    tx([s], 'readonly', (t) => getAll(t, s))
+  ok('purchase_orders store', Array.isArray(await empty(STORES.purchase_orders)))
+  ok('deliveries store', Array.isArray(await empty(STORES.deliveries)))
+  ok('payments store', Array.isArray(await empty(STORES.payments)))
 
   console.log('\n=== a delivery moves stock AND debt, in one write ===')
   const pid = await createProduct({

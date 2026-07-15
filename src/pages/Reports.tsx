@@ -11,7 +11,7 @@ import {
 } from '../lib/format'
 import { Page, Kpi, MarginChip } from '../components/ui'
 import { TrendChart, BrandChart } from '../components/charts'
-import CloudBackup from '../components/CloudBackup'
+import AccountPanel from '../components/AccountPanel'
 import { revenueByMethod } from '../lib/kassa'
 import type { Transaction } from '../lib/types'
 
@@ -260,7 +260,7 @@ export default function Reports() {
         )}
       </div>
 
-      <CloudBackup />
+      <AccountPanel />
       <DangerZone />
     </Page>
   )
