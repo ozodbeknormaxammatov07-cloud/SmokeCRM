@@ -1,13 +1,13 @@
 import { useMemo, useRef, useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useStore } from '../store'
-import { commitCart, StockError } from '../lib/db'
-import { createDelivery } from '../lib/procurement'
+import { commitCart, StockError, voidTransaction } from '../lib/db'
+import { createDelivery, voidDelivery } from '../lib/procurement'
 import { outstandingLines } from '../lib/payables'
 import { money, num, parseNum, isoDay, startOfDay } from '../lib/format'
 import { stockLevel } from '../lib/analytics'
 import { Page, StockBadge, Empty } from './ui'
-import type { CartLine, Product, TxType, SalePaymentMethod } from '../lib/types'
+import type { CartLine, Product, TxType, SalePaymentMethod, Transaction, Delivery } from '../lib/types'
 
 interface Props {
   type: TxType
@@ -23,7 +23,7 @@ interface Props {
  * restock this page has always been — no debt, nothing recorded against anybody.
  */
 export default function Counter({ type }: Props) {
-  const { products, brands, actor, toast, suppliers, orders, deliveries } = useStore()
+  const { products, brands, actor, toast, suppliers, orders, deliveries, recent } = useStore()
   const isSale = type === 'SALE'
   const [params] = useSearchParams()
   const orderId = params.get('buyurtma') ?? ''
@@ -225,6 +225,161 @@ export default function Counter({ type }: Props) {
       toast(msg, 'err')
     } finally {
       setBusy(false)
+    }
+  }
+
+  /**
+   * Today's Kirim, so a mistake can be fixed right where it was made instead of hunting
+   * through Hisobotlar. Delivery lines can only be corrected as a whole — voidDelivery
+   * reverses every line in one write, same as the Firma page already does — so they're
+   * grouped by ref_id and shown as one row. A plain restock (no firm) has no such grouping
+   * on the write side, so each line stays independently editable/deletable, same as the
+   * history table on Hisobotlar.
+   */
+  const todayStart = startOfDay(isoDay(Date.now()))
+
+  const todayDeliveries = useMemo(() => {
+    if (isSale) return []
+    const refs = new Set(
+      recent
+        .filter((t) => t.type === 'RESTOCK' && t.ts >= todayStart)
+        .map((t) => t.ref_id),
+    )
+    return deliveries
+      .filter((d) => refs.has(d.id) && !d.voided && !d.reversal_of)
+      .sort((a, b) => b.created_at - a.created_at)
+  }, [recent, deliveries, isSale, todayStart])
+
+  const todayPlainLines = useMemo(() => {
+    if (isSale) return []
+    const deliveryIds = new Set(deliveries.map((d) => d.id))
+    return recent
+      .filter((t) =>
+        t.type === 'RESTOCK' &&
+        !t.voided &&
+        !t.reversal_of &&
+        t.ts >= todayStart &&
+        !deliveryIds.has(t.ref_id),
+      )
+      .sort((a, b) => b.ts - a.ts)
+  }, [recent, deliveries, isSale, todayStart])
+
+  const todaySalesLines = useMemo(() => {
+    if (!isSale) return []
+    return recent
+      .filter((t) => t.type === 'SALE' && !t.voided && !t.reversal_of && t.ts >= todayStart)
+      .sort((a, b) => b.ts - a.ts)
+  }, [recent, isSale, todayStart])
+
+  const [actionBusy, setActionBusy] = useState(false)
+
+  /** Loads an old entry back into the basket for editing. The old entry is voided first —
+   *  submitting the (possibly adjusted) basket then posts it as a fresh one. */
+  const loadForEdit = (
+    newLines: CartLine[],
+    firm?: { firmId: string; docNumber: string; deliveredDay: string },
+  ): boolean => {
+    if (lines.length && !confirm("Joriy savat tozalanadi. Davom etilsinmi?")) return false
+    setLines(newLines)
+    setQtyDraft({})
+    setFirmId(firm?.firmId ?? '')
+    setDocNumber(firm?.docNumber ?? '')
+    setDeliveredDay(firm?.deliveredDay ?? isoDay(Date.now()))
+    setPayType('owe')
+    setNote('')
+    searchRef.current?.focus()
+    return true
+  }
+
+  const editPlainLine = async (t: Transaction) => {
+    const p = products.find((x) => x.id === t.product_id)
+    if (!p) {
+      toast("Mahsulot topilmadi (o'chirilgan bo'lishi mumkin)", 'err')
+      return
+    }
+    if (!loadForEdit([{ product: p, quantity: t.quantity, unit_price: t.unit_price }])) return
+    try {
+      await voidTransaction(t, actor)
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Xatolik', 'err')
+    }
+  }
+
+  const deletePlainLine = async (t: Transaction) => {
+    if (!confirm(`"${t.product_name}" — ${num(t.quantity)} dona kirim o'chirilsinmi?`)) return
+    setActionBusy(true)
+    try {
+      await voidTransaction(t, actor)
+      toast('Kirim o\'chirildi')
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Xatolik', 'err')
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  const editDelivery = async (d: Delivery) => {
+    const cartLines: CartLine[] = []
+    for (const l of d.lines) {
+      const p = products.find((x) => x.id === l.product_id)
+      if (!p) {
+        toast(`"${l.product_name}" mahsuloti topilmadi (o'chirilgan bo'lishi mumkin)`, 'err')
+        return
+      }
+      cartLines.push({ product: p, quantity: l.quantity, unit_price: l.unit_cost })
+    }
+    if (
+      !loadForEdit(cartLines, {
+        firmId: d.supplier_id,
+        docNumber: d.doc_number ?? '',
+        deliveredDay: isoDay(d.delivered_at),
+      })
+    ) return
+    try {
+      await voidDelivery(d.id, actor)
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Xatolik', 'err')
+    }
+  }
+
+  const deleteDelivery = async (d: Delivery) => {
+    if (!confirm(`Yetkazib berish (${num(d.lines.length)} ta mahsulot, ${money(d.total_amount)}) o'chirilsinmi?`)) return
+    setActionBusy(true)
+    try {
+      await voidDelivery(d.id, actor)
+      toast('Yetkazib berish o\'chirildi')
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Xatolik', 'err')
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  const editSaleLine = async (t: Transaction) => {
+    const p = products.find((x) => x.id === t.product_id)
+    if (!p) {
+      toast("Mahsulot topilmadi (o'chirilgan bo'lishi mumkin)", 'err')
+      return
+    }
+    if (!loadForEdit([{ product: p, quantity: t.quantity, unit_price: t.unit_price }])) return
+    setSalePay(t.payment_method ?? 'cash')
+    try {
+      await voidTransaction(t, actor)
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Xatolik', 'err')
+    }
+  }
+
+  const deleteSaleLine = async (t: Transaction) => {
+    if (!confirm(`"${t.product_name}" — ${num(t.quantity)} dona sotuv o'chirilsinmi?`)) return
+    setActionBusy(true)
+    try {
+      await voidTransaction(t, actor)
+      toast('Sotuv o\'chirildi')
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Xatolik', 'err')
+    } finally {
+      setActionBusy(false)
     }
   }
 
@@ -545,6 +700,123 @@ export default function Counter({ type }: Props) {
           </div>
         </div>
       </div>
+
+      {!isSale && (!!todayDeliveries.length || !!todayPlainLines.length) && (
+        <div className="card p-4 mt-5">
+          <h2 className="font-semibold mb-3">Bugungi kirimlar</h2>
+          <div className="space-y-2">
+            {todayDeliveries.map((d) => {
+              const firm = suppliers.find((f) => f.id === d.supplier_id)
+              return (
+                <div
+                  key={d.id}
+                  className="rounded-lg border border-ink-200 p-2.5 flex items-center justify-between gap-2"
+                >
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold truncate">
+                      {firm?.name ?? 'Firma'}{d.doc_number ? ` · №${d.doc_number}` : ''}
+                    </div>
+                    <div className="text-xs text-ink-400">
+                      {num(d.lines.length)} mahsulot · {money(d.total_amount)}
+                    </div>
+                  </div>
+                  <div className="flex gap-3 shrink-0">
+                    <button
+                      disabled={actionBusy}
+                      onClick={() => void editDelivery(d)}
+                      className="text-xs font-semibold text-ink-500 hover:text-ink-900 disabled:opacity-40"
+                    >
+                      Tahrirlash
+                    </button>
+                    <button
+                      disabled={actionBusy}
+                      onClick={() => void deleteDelivery(d)}
+                      className="text-xs font-semibold text-ink-400 hover:text-red-600 disabled:opacity-40"
+                    >
+                      O'chirish
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
+            {todayPlainLines.map((t) => (
+              <div
+                key={t.id}
+                className="rounded-lg border border-ink-200 p-2.5 flex items-center justify-between gap-2"
+              >
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold truncate">{t.product_name}</div>
+                  <div className="text-xs text-ink-400">
+                    {num(t.quantity)} dona · {money(t.total_amount)}
+                  </div>
+                </div>
+                <div className="flex gap-3 shrink-0">
+                  <button
+                    disabled={actionBusy}
+                    onClick={() => void editPlainLine(t)}
+                    className="text-xs font-semibold text-ink-500 hover:text-ink-900 disabled:opacity-40"
+                  >
+                    Tahrirlash
+                  </button>
+                  <button
+                    disabled={actionBusy}
+                    onClick={() => void deletePlainLine(t)}
+                    className="text-xs font-semibold text-ink-400 hover:text-red-600 disabled:opacity-40"
+                  >
+                    O'chirish
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-ink-400 mt-3">
+            Yozuvlar o'chirilmaydi: "O'chirish" teskari yozuv qo'shadi va qoldiqni tiklaydi.
+            "Tahrirlash" xuddi shunday bekor qilib, savatga qayta yuklaydi — tuzatib qayta tasdiqlang.
+          </p>
+        </div>
+      )}
+
+      {isSale && !!todaySalesLines.length && (
+        <div className="card p-4 mt-5">
+          <h2 className="font-semibold mb-3">Bugungi sotuvlar</h2>
+          <div className="space-y-2">
+            {todaySalesLines.map((t) => (
+              <div
+                key={t.id}
+                className="rounded-lg border border-ink-200 p-2.5 flex items-center justify-between gap-2"
+              >
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold truncate">{t.product_name}</div>
+                  <div className="text-xs text-ink-400">
+                    {num(t.quantity)} dona · {money(t.total_amount)}
+                    {t.payment_method ? ` · ${{ cash: 'Naqd', card: 'Plastik', click: 'Click' }[t.payment_method]}` : ''}
+                  </div>
+                </div>
+                <div className="flex gap-3 shrink-0">
+                  <button
+                    disabled={actionBusy}
+                    onClick={() => void editSaleLine(t)}
+                    className="text-xs font-semibold text-ink-500 hover:text-ink-900 disabled:opacity-40"
+                  >
+                    Tahrirlash
+                  </button>
+                  <button
+                    disabled={actionBusy}
+                    onClick={() => void deleteSaleLine(t)}
+                    className="text-xs font-semibold text-ink-400 hover:text-red-600 disabled:opacity-40"
+                  >
+                    O'chirish
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-ink-400 mt-3">
+            Yozuvlar o'chirilmaydi: "O'chirish" teskari yozuv qo'shadi va qoldiqni tiklaydi.
+            "Tahrirlash" xuddi shunday bekor qilib, savatga qayta yuklaydi — tuzatib qayta tasdiqlang.
+          </p>
+        </div>
+      )}
     </Page>
   )
 }
