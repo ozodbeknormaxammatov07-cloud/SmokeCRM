@@ -1,4 +1,4 @@
-import type { Product, Transaction } from './types'
+import type { Product, Transaction, PriceType } from './types'
 import { isoDay, marginPct } from './format'
 
 export interface Totals {
@@ -165,3 +165,7 @@ export function inventoryValue(products: Product[]): { atCost: number; atRetail:
 export function productMargin(p: Product): number {
   return marginPct(p.cost_price, p.selling_price)
 }
+
+/** The price a product sells at on a given price list. No card price set → the normal price. */
+export const priceFor = (p: Product, pt: PriceType): number =>
+  pt === 'card' && p.card_price ? p.card_price : p.selling_price

@@ -246,11 +246,11 @@ export function tx<T>(
 // actually clears it on update.
 
 const COLUMNS: Record<StoreName, string[]> = {
-  products: ['id', 'name', 'brand', 'cost_price', 'selling_price', 'reorder_threshold',
+  products: ['id', 'name', 'brand', 'cost_price', 'selling_price', 'card_price', 'reorder_threshold',
     'barcode', 'supplier_id', 'active', 'created_at', 'updated_at', 'deleted_at'],
   transactions: ['id', 'ts', 'type', 'product_id', 'product_name', 'brand', 'quantity',
     'unit_price', 'cost_price', 'total_amount', 'profit', 'note', 'user_name', 'user_role',
-    'ref_id', 'voided', 'reversal_of', 'payment_method'],
+    'ref_id', 'voided', 'reversal_of', 'payment_method', 'price_type'],
   suppliers: ['id', 'name', 'contact', 'note', 'inn', 'bank_account', 'bank_name', 'bank_mfo',
     'address', 'director', 'payment_terms_days', 'updated_at', 'deleted_at'],
   purchase_orders: ['id', 'supplier_id', 'number', 'ordered_at', 'expected_at', 'lines',
@@ -289,6 +289,7 @@ function mapRow(store: StoreName, r: Record<string, unknown>): Row {
       return {
         id: String(r.id), name: String(r.name ?? ''), brand: String(r.brand ?? ''),
         cost_price: n(r.cost_price), selling_price: n(r.selling_price),
+        card_price: nOrU(r.card_price),
         current_stock: 0, // derived by recomputeAllStock from the ledger
         reorder_threshold: n(r.reorder_threshold), barcode: (r.barcode as string) ?? undefined,
         supplier_id: (r.supplier_id as string) ?? undefined, active: Boolean(r.active),
@@ -304,6 +305,7 @@ function mapRow(store: StoreName, r: Record<string, unknown>): Row {
         user_role: role(r.user_role), ref_id: String(r.ref_id ?? ''), voided: Boolean(r.voided),
         reversal_of: (r.reversal_of as string) ?? undefined,
         payment_method: (r.payment_method as Transaction['payment_method']) ?? undefined,
+        price_type: r.price_type === 'card' ? 'card' : r.price_type === 'cash' ? 'cash' : undefined,
       } as unknown as Row
     case 'suppliers':
       return {

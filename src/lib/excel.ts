@@ -252,6 +252,7 @@ export function exportProducts(products: Product[]) {
     'Brend': p.brand,
     'Kelish narxi': p.cost_price,
     'Sotish narxi': p.selling_price,
+    'Karta narxi': p.card_price ?? p.selling_price,
     'Foyda (dona)': p.selling_price - p.cost_price,
     'Marja %': p.selling_price ? +(((p.selling_price - p.cost_price) / p.selling_price) * 100).toFixed(1) : 0,
     'Qoldiq': p.current_stock,
@@ -261,7 +262,7 @@ export function exportProducts(products: Product[]) {
     'Faol': p.active ? 'ha' : 'yo‘q',
   }))
   const wb = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(wb, sheetFrom(rows, [28, 14, 14, 14, 13, 9, 9, 13, 15, 16, 7]), 'Mahsulotlar')
+  XLSX.utils.book_append_sheet(wb, sheetFrom(rows, [28, 14, 14, 14, 14, 13, 9, 9, 13, 15, 16, 7]), 'Mahsulotlar')
   download(wb, `mahsulotlar_${isoDay(Date.now())}.xlsx`)
 }
 

@@ -6,10 +6,14 @@ import { findByBarcode, looksLikeBarcode, cleanCode, useGlobalScanner, beep } fr
 import { createDelivery, voidDelivery } from '../lib/procurement'
 import { outstandingLines } from '../lib/payables'
 import { money, num, parseNum, isoDay, startOfDay } from '../lib/format'
-import { stockLevel } from '../lib/analytics'
+import { stockLevel, priceFor } from '../lib/analytics'
 import { Page, StockBadge, Empty, Modal } from './ui'
 import QtyPicker from './QtyPicker'
-import type { CartLine, Product, TxType, SalePaymentMethod, Transaction, Delivery } from '../lib/types'
+import type { CartLine, Product, TxType, SalePaymentMethod, Transaction, Delivery, PriceType } from '../lib/types'
+
+/** One basket line per product AND price list — the same pack can be sold at both prices. */
+const lineKey = (l: CartLine) => `${l.product.id}:${l.price_type ?? 'cash'}`
+
 
 interface Props {
   type: TxType
@@ -120,14 +124,15 @@ export default function Counter({ type }: Props) {
     return m
   }, [lines])
 
-  const add = (p: Product, n = 1): boolean => {
+  const add = (p: Product, n = 1, pt: PriceType = 'cash'): boolean => {
     const already = inCart.get(p.id) ?? 0
     if (isSale && already + n > p.current_stock) {
       toast(`"${p.name}" — omborda faqat ${p.current_stock} dona bor`, 'err')
       return false
     }
     setLines((prev) => {
-      const i = prev.findIndex((l) => l.product.id === p.id)
+      const priceType = isSale ? pt : undefined
+      const i = prev.findIndex((l) => l.product.id === p.id && l.price_type === priceType)
       if (i >= 0) {
         const next = [...prev]
         next[i] = { ...next[i], quantity: next[i].quantity + n }
@@ -135,7 +140,12 @@ export default function Counter({ type }: Props) {
       }
       return [
         ...prev,
-        { product: p, quantity: n, unit_price: isSale ? p.selling_price : p.cost_price },
+        {
+          product: p,
+          quantity: n,
+          unit_price: isSale ? priceFor(p, pt) : p.cost_price,
+          price_type: priceType,
+        },
       ]
     })
     setQ('')
@@ -183,9 +193,9 @@ export default function Counter({ type }: Props) {
   const onScanRef = useRef(onScan)
   onScanRef.current = onScan
 
-  const confirmPick = (n: number) => {
+  const confirmPick = (n: number, pt: PriceType) => {
     if (!pick) return
-    if (add(pick, n)) {
+    if (add(pick, n, pt)) {
       setLastScan({ code: pick.barcode ?? '', ok: true, msg: `${pick.name} — ${n} dona savatga qo'shildi` })
       setPick(null)
     }
@@ -225,7 +235,7 @@ export default function Counter({ type }: Props) {
   const setQty =(id: string, qty: number) => {
     setLines((prev) =>
       prev.flatMap((l) => {
-        if (l.product.id !== id) return [l]
+        if (lineKey(l) !== id) return [l]
         if (qty <= 0) return []
         return [{ ...l, quantity: qty }]
       }),
@@ -253,7 +263,7 @@ export default function Counter({ type }: Props) {
   }
 
   const setPrice = (id: string, price: number) => {
-    setLines((prev) => prev.map((l) => (l.product.id === id ? { ...l, unit_price: price } : l)))
+    setLines((prev) => prev.map((l) => (lineKey(l) === id ? { ...l, unit_price: price } : l)))
   }
 
   const total = lines.reduce((s, l) => s + l.unit_price * l.quantity, 0)
@@ -604,14 +614,19 @@ export default function Counter({ type }: Props) {
               {lines.map((l) => {
                 const over = isSale && l.quantity > l.product.current_stock
                 return (
-                  <div key={l.product.id} className={`rounded-lg border p-2.5 ${over ? 'border-red-300 bg-red-50' : 'border-ink-200'}`}>
+                  <div key={lineKey(l)} className={`rounded-lg border p-2.5 ${over ? 'border-red-300 bg-red-50' : 'border-ink-200'}`}>
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
                         <div className="text-sm font-semibold line-clamp-2 sm:truncate">{l.product.name}</div>
-                        <div className="text-xs text-ink-400">{l.product.brand}</div>
+                        <div className="text-xs text-ink-400">
+                          {l.product.brand}
+                          {l.price_type === 'card' && (
+                            <span className="ml-1.5 chip bg-blue-50 text-blue-700">Karta narx</span>
+                          )}
+                        </div>
                       </div>
                       <button
-                        onClick={() => setQty(l.product.id, 0)}
+                        onClick={() => setQty(lineKey(l), 0)}
                         className="text-ink-300 hover:text-red-600 text-lg leading-none"
                         aria-label="O'chirish"
                       >
@@ -622,21 +637,21 @@ export default function Counter({ type }: Props) {
                     <div className="flex items-center gap-2 mt-2">
                       <div className="flex items-center rounded-lg border border-ink-200 bg-white h-9">
                         <button
-                          onClick={() => setQty(l.product.id, l.quantity - 1)}
+                          onClick={() => setQty(lineKey(l), l.quantity - 1)}
                           className="w-9 h-full text-ink-500 hover:text-ink-900 font-bold"
                         >
                           −
                         </button>
                         <input
                           className="w-12 h-full text-center text-sm font-semibold num outline-none"
-                          value={qtyDraft[l.product.id] ?? String(l.quantity)}
-                          onChange={(e) => typeQty(l.product.id, e.target.value)}
-                          onBlur={() => commitQty(l.product.id)}
+                          value={qtyDraft[lineKey(l)] ?? String(l.quantity)}
+                          onChange={(e) => typeQty(lineKey(l), e.target.value)}
+                          onBlur={() => commitQty(lineKey(l))}
                           onFocus={(e) => e.target.select()}
                           inputMode="numeric"
                         />
                         <button
-                          onClick={() => setQty(l.product.id, l.quantity + 1)}
+                          onClick={() => setQty(lineKey(l), l.quantity + 1)}
                           className="w-9 h-full text-ink-500 hover:text-ink-900 font-bold"
                         >
                           +
@@ -646,7 +661,7 @@ export default function Counter({ type }: Props) {
                       <input
                         className="field h-9 flex-1 num text-right"
                         value={l.unit_price}
-                        onChange={(e) => setPrice(l.product.id, parseNum(e.target.value))}
+                        onChange={(e) => setPrice(lineKey(l), parseNum(e.target.value))}
                         inputMode="numeric"
                         title={isSale ? 'Sotish narxi' : 'Kelish narxi'}
                       />
@@ -947,14 +962,15 @@ export default function Counter({ type }: Props) {
         <QtyPicker
           key={pick.id}
           product={pick}
-          unitPrice={isSale ? pick.selling_price : pick.cost_price}
+          priceOf={(pt) => (isSale ? priceFor(pick, pt) : pick.cost_price)}
           isSale={isSale}
+          initialPt={lines.at(-1)?.price_type ?? 'cash'}
           left={isSale ? pick.current_stock - (inCart.get(pick.id) ?? 0) : Infinity}
           isKnownCode={(c) => !!findByBarcode(products, c)}
           onConfirm={confirmPick}
           onCancel={() => { setPick(null); setTimeout(focusSearch, 0) }}
-          onNextScan={(code, n) => {
-            const ok = add(pick, n)
+          onNextScan={(code, n, pt) => {
+            const ok = add(pick, n, pt)
             setPick(null)
             if (ok) setTimeout(() => onScanRef.current(code), 0)
           }}

@@ -206,6 +206,10 @@ create index if not exists payments_user_supplier_idx on public.payments (user_i
 -- How each sale was paid (naqd/plastik/click). Only naqd sales feed the physical drawer.
 alter table public.transactions add column if not exists payment_method text;
 
+-- Two price lists: the normal (naqd) price and a card price. A sale records which one it used.
+alter table public.products     add column if not exists card_price numeric;
+alter table public.transactions add column if not exists price_type text;
+
 -- Manual cash-drawer movements: deposits, expenses, withdrawals, and count corrections. Money,
 -- so append-only and corrected by an opposite-signed twin, and paged on created_at like payments.
 create table if not exists public.cash_movements (

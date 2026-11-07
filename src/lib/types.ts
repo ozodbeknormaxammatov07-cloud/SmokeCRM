@@ -19,6 +19,8 @@ export interface Product {
    */
   current_stock: number
   reorder_threshold: number
+  /** Price when the customer pays by card. Unset = same as selling_price. */
+  card_price?: number
   barcode?: string
   supplier_id?: string
   active: boolean
@@ -60,6 +62,8 @@ export interface Transaction {
   reversal_of?: string
   /** How a SALE was paid. Unset on RESTOCK and on sales made before this feature. */
   payment_method?: SalePaymentMethod
+  /** Which price list the sale used: the normal (naqd) price or the card price. SALE only. */
+  price_type?: PriceType
 }
 
 /**
@@ -90,6 +94,9 @@ export type PaymentMethod = 'cash' | 'bank' | 'card' | 'other'
 
 /** How a customer paid for a sale. Only 'cash' touches the cash drawer (Kassa). */
 export type SalePaymentMethod = 'cash' | 'card' | 'click'
+
+/** The two price lists a product sells at: `cash` = selling_price, `card` = card_price. */
+export type PriceType = 'cash' | 'card'
 
 export type CashMovementKind = 'deposit' | 'expense' | 'withdrawal' | 'correction'
 
@@ -240,4 +247,6 @@ export interface CartLine {
   product: Product
   quantity: number
   unit_price: number
+  /** SALE only. The same product can sit in the basket twice, once at each price. */
+  price_type?: PriceType
 }

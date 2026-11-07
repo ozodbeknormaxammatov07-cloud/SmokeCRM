@@ -12,7 +12,7 @@ import {
 import { Page, Kpi, MarginChip } from '../components/ui'
 import { TrendChart, BrandChart } from '../components/charts'
 import AccountPanel from '../components/AccountPanel'
-import { revenueByMethod } from '../lib/kassa'
+import { revenueByMethod, salesByPriceType } from '../lib/kassa'
 import type { Transaction } from '../lib/types'
 
 const PRESETS = [
@@ -32,6 +32,8 @@ export default function Reports() {
   const [to, setTo] = useState(isoDay(Date.now()))
   const [grain, setGrain] = useState<Grain>('day')
   const [brand, setBrand] = useState('')
+  // '' = both price lists. Only sales have a price list; restocks always pass through.
+  const [priceType, setPriceType] = useState<'' | 'cash' | 'card'>('')
   const [tab, setTab] = useState<Tab>('brand')
   const [raw, setRaw] = useState<Transaction[]>([])
   const [busy, setBusy] = useState(false)
@@ -42,10 +44,18 @@ export default function Reports() {
 
   // Brand is filtered client-side: a brand + date-range Firestore query would need a
   // composite index for every brand, and the range is already small.
-  const txs = useMemo(
+  const byBrandOnly = useMemo(
     () => (brand ? raw.filter((t) => t.brand === brand) : raw),
     [raw, brand],
   )
+  const txs = useMemo(
+    () => (priceType
+      ? byBrandOnly.filter((t) => t.type !== 'SALE' || (t.price_type ?? 'cash') === priceType)
+      : byBrandOnly),
+    [byBrandOnly, priceType],
+  )
+  // The split is shown even while filtered to one price list — computed before that filter.
+  const byPrice = useMemo(() => salesByPriceType(byBrandOnly), [byBrandOnly])
 
   const t = useMemo(() => totals(txs), [txs])
   const series = useMemo(() => timeSeries(txs, grain), [txs, grain])
@@ -65,6 +75,7 @@ export default function Reports() {
       summary: {
         'Davr': `${from} — ${to}`,
         'Brend': brand || 'hammasi',
+        'Narx turi': priceType === 'cash' ? 'Naqd narx' : priceType === 'card' ? 'Karta narx' : 'hammasi',
         'Tushum (so\'m)': t.revenue,
         'Foyda (so\'m)': t.profit,
         'Marja %': +t.margin.toFixed(1),
@@ -196,6 +207,14 @@ export default function Reports() {
             </select>
           </div>
           <div>
+            <label className="label">Narx turi</label>
+            <select className="field w-40" value={priceType} onChange={(e) => setPriceType(e.target.value as '' | 'cash' | 'card')}>
+              <option value="">Hammasi</option>
+              <option value="cash">Naqd narx</option>
+              <option value="card">Karta narx</option>
+            </select>
+          </div>
+          <div>
             <label className="label">Guruhlash</label>
             <select className="field w-32" value={grain} onChange={(e) => setGrain(e.target.value as Grain)}>
               <option value="day">Kunlik</option>
@@ -211,6 +230,28 @@ export default function Reports() {
         <Kpi label="Foyda" value={money(t.profit)} sub={`marja ${pct(t.margin)}`} tone={t.profit >= 0 ? 'good' : 'bad'} />
         <Kpi label="Sotilgan" value={`${num(t.unitsSold)} dona`} />
         <Kpi label="Kirim summasi" value={money(t.restockCost)} sub="tovarga sarflandi" />
+      </div>
+
+      <div className="card p-4 mt-4">
+        <h2 className="font-semibold mb-3">Narx turi bo'yicha sotuv</h2>
+        <div className="grid grid-cols-2 gap-3">
+          {([['cash', 'Naqd narx'], ['card', 'Karta narx']] as const).map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setPriceType(priceType === key ? '' : key)}
+              className={`rounded-lg border p-3 text-left transition-colors ${
+                priceType === key ? 'border-ink-950 ring-2 ring-ink-950/10 bg-white' : 'bg-ink-50 border-ink-200'
+              }`}
+            >
+              <div className={`text-xs font-semibold ${key === 'card' ? 'text-blue-700' : 'text-ink-500'}`}>{label}</div>
+              <div className="text-lg font-bold num tracking-tight mt-0.5">{money(byPrice[key].revenue)}</div>
+              <div className="text-xs text-ink-400 num mt-0.5">
+                {num(byPrice[key].units)} dona · foyda {money(byPrice[key].profit)}
+              </div>
+            </button>
+          ))}
+        </div>
+        <p className="text-xs text-ink-400 mt-2">Bosing — hisobot shu narx turi bo'yicha filtrlanadi.</p>
       </div>
 
       <div className="card p-4 mt-4">
@@ -428,6 +469,7 @@ function HistoryTable({ txs, onVoid }: { txs: Transaction[]; onVoid: (t: Transac
                   </td>
                   <td className="td font-medium max-w-[14rem] truncate" title={t.note || t.product_name}>
                     {t.product_name}
+                    {t.price_type === 'card' && <span className="ml-1.5 chip bg-blue-50 text-blue-700">karta</span>}
                     {reversal && <span className="ml-2 chip bg-amber-100 text-amber-700">bekor qilish</span>}
                   </td>
                   <td className="td text-right num">{num(t.quantity)}</td>

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { money, num } from '../lib/format'
 import { cleanCode } from '../lib/scanner'
-import type { Product } from '../lib/types'
+import type { Product, PriceType } from '../lib/types'
 
 /**
  * "How many?" after a scan. Customers buy 5 or 10 packs at once; scanning each one is silly.
@@ -9,6 +9,7 @@ import type { Product } from '../lib/types'
  * Keys (no box needs to be clicked):
  *   digits      type the quantity (replaces it)      +  =  ↑   one more
  *   Backspace   delete a digit                        -  ↓      one less
+ *   ←  Naqd price   →  Karta price  (Sotuv only)
  *   Enter       add to basket                         Esc       cancel
  * Scanning the next pack while this is open adds this one first and moves on; scanning the
  * SAME pack again just counts one more.
@@ -19,20 +20,27 @@ import type { Product } from '../lib/types'
  * the 10 isn't lost.
  */
 export default function QtyPicker({
-  product, unitPrice, isSale, left, isKnownCode, onConfirm, onCancel, onNextScan,
+  product, priceOf, isSale, initialPt, left, isKnownCode, onConfirm, onCancel, onNextScan,
 }: {
   product: Product
-  unitPrice: number
+  /** Unit price on a given price list (Kirim ignores the list and uses the cost price). */
+  priceOf: (pt: PriceType) => number
   isSale: boolean
+  /** Price list to start on — the basket's last one, so a card customer's packs stay on card. */
+  initialPt: PriceType
   /** Sale: packs still available after what's already in the basket. Restock: Infinity. */
   left: number
   isKnownCode: (code: string) => boolean
-  onConfirm: (qty: number) => void
+  onConfirm: (qty: number, pt: PriceType) => void
   onCancel: () => void
   /** Another code arrived: add this product with `qty`, then handle `code`. */
-  onNextScan: (code: string, qty: number) => void
+  onNextScan: (code: string, qty: number, pt: PriceType) => void
 }) {
   const [qty, setQty] = useState(1)
+  const [pt, setPtState] = useState<PriceType>(isSale ? initialPt : 'cash')
+  const ptRef = useRef(pt)
+  const setPt = (v: PriceType) => { ptRef.current = v; setPtState(v) }
+  const unitPrice = priceOf(pt)
   const [typed, setTyped] = useState('') // current run of typed characters
   const before = useRef(1)               // qty when the current typed run started
   const inputRef = useRef<HTMLInputElement>(null)
@@ -74,11 +82,11 @@ export default function QtyPicker({
         setRun('', clamp(thisQty + 1))
         return
       }
-      onNextScan(code, thisQty)
+      onNextScan(code, thisQty, ptRef.current)
       return
     }
     if (isSale && q > left) return
-    onConfirm(q)
+    onConfirm(q, ptRef.current)
   }
 
   useEffect(() => {
@@ -96,6 +104,8 @@ export default function QtyPicker({
         e.preventDefault(); e.stopPropagation(); finish(); return
       }
       if (e.key === 'Escape') { e.preventDefault(); onCancel(); return }
+      if (isSale && run.length < 4 && e.key === 'ArrowLeft') { e.preventDefault(); setPt('cash'); return }
+      if (isSale && run.length < 4 && e.key === 'ArrowRight') { e.preventDefault(); setPt('card'); return }
       if (inBox) return // typing in the number box: let the box handle it
 
       // + / - only mean "step" outside a scan (a DataMatrix code can contain them).
@@ -135,12 +145,33 @@ export default function QtyPicker({
           <div className="min-w-0">
             <div className="font-semibold leading-snug">{product.name}</div>
             <div className="text-xs text-ink-400 mt-0.5">
-              {product.brand} · {money(unitPrice)}
+              {product.brand}{!isSale && <> · {money(unitPrice)}</>}
               {isSale && <> · omborda {num(left)}</>}
             </div>
           </div>
           <button onClick={onCancel} className="text-ink-400 hover:text-ink-900 text-2xl leading-none px-1 -mt-1" aria-label="Bekor">×</button>
         </div>
+
+        {isSale && (
+          <div className="grid grid-cols-2 gap-2 mt-4">
+            {([['cash', 'Naqd narx', '←'], ['card', 'Karta narx', '→']] as const).map(([key, label, hint]) => (
+              <button
+                key={key}
+                onClick={() => setPt(key)}
+                className={`h-16 rounded-xl border-2 px-3 text-left transition-colors ${
+                  pt === key
+                    ? key === 'card' ? 'border-blue-600 bg-blue-600 text-white' : 'border-ink-950 bg-ink-950 text-white'
+                    : 'border-ink-200 bg-white text-ink-700'
+                }`}
+              >
+                <div className="flex items-center justify-between text-xs font-semibold opacity-80">
+                  <span>{label}</span><span className="hidden sm:inline">{hint}</span>
+                </div>
+                <div className="text-lg font-bold num leading-tight">{money(priceOf(key))}</div>
+              </button>
+            ))}
+          </div>
+        )}
 
         <div className="flex items-center justify-center gap-3 mt-5">
           <button onClick={() => step(-1)} disabled={qty <= 1}
@@ -183,7 +214,7 @@ export default function QtyPicker({
           Savatga qo'shish
         </button>
         <p className="hidden sm:block text-center text-xs text-ink-400 mt-2">
-          Raqam yozing · <b>+</b> / <b>−</b> · <b>Enter</b> — qo'shish · <b>Esc</b> — bekor · keyingisini skanerlasangiz o'zi qo'shiladi
+          Raqam yozing · <b>+</b> / <b>−</b>{isSale && <> · <b>←</b> naqd / <b>→</b> karta</>} · <b>Enter</b> — qo'shish · <b>Esc</b> — bekor · keyingisini skanerlasangiz o'zi qo'shiladi
         </p>
       </div>
     </div>

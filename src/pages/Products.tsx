@@ -106,6 +106,9 @@ export default function Products() {
                   </div>
                   <div className="text-sm font-semibold num mt-0.5">
                     {money(p.selling_price)}
+                    {!!p.card_price && p.card_price !== p.selling_price && (
+                      <span className="ml-1.5 text-xs font-semibold text-blue-700">karta {money(p.card_price)}</span>
+                    )}
                     {manage && <span className="ml-2 align-middle"><MarginChip value={productMargin(p)} /></span>}
                   </div>
                 </button>
@@ -156,7 +159,12 @@ export default function Products() {
                       </td>
                       <td className="td text-ink-500">{p.brand}</td>
                       {manage && <td className="td text-right num">{money(p.cost_price)}</td>}
-                      <td className="td text-right num">{money(p.selling_price)}</td>
+                      <td className="td text-right num">
+                        {money(p.selling_price)}
+                        {!!p.card_price && p.card_price !== p.selling_price && (
+                          <div className="text-xs text-blue-700">karta {money(p.card_price)}</div>
+                        )}
+                      </td>
                       {manage && (
                         <td className={`td text-right num font-medium ${unitProfit <= 0 ? 'text-red-600' : 'text-emerald-600'}`}>
                           {money(unitProfit)}
@@ -319,12 +327,26 @@ function ProductForm({ initial, brands, actor, onClose, onSaved, onError }: {
             />
           </div>
           <div>
-            <label className="label">Sotish narxi (so'm) *</label>
+            <label className="label">Naqd narxi (so'm) *</label>
             <input
               className="field num" inputMode="numeric" value={f.selling_price || ''}
               onChange={(e) => set('selling_price', parseNum(e.target.value))}
             />
           </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 items-end">
+          <div>
+            <label className="label">Karta narxi (so'm)</label>
+            <input
+              className="field num" inputMode="numeric" value={f.card_price || ''}
+              placeholder={f.selling_price ? String(f.selling_price) : ''}
+              onChange={(e) => set('card_price', parseNum(e.target.value) || undefined)}
+            />
+          </div>
+          <p className="text-xs text-ink-400 pb-2.5">
+            Karta bilan to'lasa shu narx. Bo'sh qolsa — naqd narxi bilan bir xil.
+          </p>
         </div>
 
         {/* The derived numbers, shown live — never typed. */}

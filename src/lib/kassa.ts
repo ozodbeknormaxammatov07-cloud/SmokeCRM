@@ -55,6 +55,27 @@ export function revenueByMethod(
   return out
 }
 
+/**
+ * Sales split by price list: what sold at the normal (naqd) price vs the card price.
+ * Sales from before price lists existed carry no price_type — they were at the normal price.
+ */
+export function salesByPriceType(
+  txs: Transaction[],
+): Record<'cash' | 'card', { revenue: number; profit: number; units: number }> {
+  const out = {
+    cash: { revenue: 0, profit: 0, units: 0 },
+    card: { revenue: 0, profit: 0, units: 0 },
+  }
+  for (const t of txs) {
+    if (t.type !== 'SALE' || !liveTx(t)) continue
+    const k = t.price_type === 'card' ? 'card' : 'cash'
+    out[k].revenue += t.total_amount
+    out[k].profit += t.profit
+    out[k].units += t.quantity
+  }
+  return out
+}
+
 /* ------------------------------------------------------------------ */
 /* Manual movements                                                    */
 /* ------------------------------------------------------------------ */

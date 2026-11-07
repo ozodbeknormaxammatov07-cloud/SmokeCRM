@@ -244,6 +244,7 @@ export async function commitCart(
         voided: false,
         // Only a SALE carries a payment method; a RESTOCK's money doesn't hit the drawer.
         payment_method: type === 'SALE' ? payment : undefined,
+        price_type: type === 'SALE' ? (l.price_type ?? 'cash') : undefined,
       } satisfies Transaction)
     }
 
@@ -297,6 +298,8 @@ export async function voidTransaction(t0: Transaction, actor: Actor): Promise<vo
       ref_id: original.ref_id,
       voided: false,
       reversal_of: original.id,
+      // Same price list as the original, so a Hisobot filtered by price type nets it to zero.
+      price_type: original.price_type,
     } satisfies Transaction)
 
     await recomputeStock(t, original.product_id)
