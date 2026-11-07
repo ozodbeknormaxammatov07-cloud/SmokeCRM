@@ -7,7 +7,7 @@ import {
 import { totals, timeSeries, byBrand, byProduct, type Grain } from '../lib/analytics'
 import { exportReport, exportTransactions } from '../lib/excel'
 import {
-  money, moneyShort, num, pct, isoDay, daysAgo, startOfDay, endOfDay, dateTimeLabel,
+  money, num, pct, isoDay, daysAgo, startOfDay, endOfDay, dateTimeLabel,
 } from '../lib/format'
 import { Page, Kpi, MarginChip } from '../components/ui'
 import { TrendChart, BrandChart } from '../components/charts'
@@ -173,7 +173,7 @@ export default function Reports() {
             <button
               key={p.label}
               onClick={() => applyPreset(p)}
-              className={`chip h-8 px-3 ${from === p.from() ? 'bg-ink-950 text-white' : 'bg-ink-100 text-ink-600 hover:bg-ink-200'}`}
+              className={`chip h-10 sm:h-8 px-3 ${from === p.from() ? 'bg-ink-950 text-white' : 'bg-ink-100 text-ink-600 hover:bg-ink-200'}`}
             >
               {p.label}
             </button>
@@ -207,10 +207,10 @@ export default function Reports() {
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-        <Kpi label="Tushum" value={moneyShort(t.revenue)} sub={`${num(t.saleCount)} ta sotuv`} />
-        <Kpi label="Foyda" value={moneyShort(t.profit)} sub={`marja ${pct(t.margin)}`} tone={t.profit >= 0 ? 'good' : 'bad'} />
+        <Kpi label="Tushum" value={money(t.revenue)} sub={`${num(t.saleCount)} ta sotuv`} />
+        <Kpi label="Foyda" value={money(t.profit)} sub={`marja ${pct(t.margin)}`} tone={t.profit >= 0 ? 'good' : 'bad'} />
         <Kpi label="Sotilgan" value={`${num(t.unitsSold)} dona`} />
-        <Kpi label="Kirim summasi" value={moneyShort(t.restockCost)} sub="tovarga sarflandi" />
+        <Kpi label="Kirim summasi" value={money(t.restockCost)} sub="tovarga sarflandi" />
       </div>
 
       <div className="card p-4 mt-4">
@@ -244,7 +244,7 @@ export default function Reports() {
             <button
               key={k}
               onClick={() => setTab(k)}
-              className={`px-3 h-8 rounded-md text-xs font-semibold transition-colors ${
+              className={`px-3 h-10 sm:h-8 rounded-md text-xs font-semibold transition-colors ${
                 tab === k ? 'bg-white text-ink-950 shadow-sm' : 'text-ink-500'
               }`}
             >

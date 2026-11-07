@@ -17,15 +17,6 @@ export function money(n: number): string {
   return `${num(Math.round(n))} so'm`
 }
 
-/** Compact form for KPI cards: 12 400 000 -> "12,4 mln so'm" */
-export function moneyShort(n: number): string {
-  const abs = Math.abs(n)
-  if (abs >= 1_000_000_000) return `${num(n / 1_000_000_000, 1)} mlrd so'm`
-  if (abs >= 1_000_000) return `${num(n / 1_000_000, 1)} mln so'm`
-  if (abs >= 10_000) return `${num(n / 1_000, 0)} ming so'm`
-  return money(n)
-}
-
 export function pct(n: number): string {
   if (!isFinite(n)) return '—'
   return `${num(n, 1)}%`

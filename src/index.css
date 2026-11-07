@@ -65,3 +65,32 @@
     @apply tabular-nums;
   }
 }
+
+/* ── Phones ───────────────────────────────────────────────────────────────────────────── */
+/* Selectors below use [class~="…"] rather than .btn / .chip on purpose: Tailwind's `@apply btn`
+   copies EVERY rule that mentions `.btn` into each class that applies it, which turned the
+   ":not(.btn)" exclusion into its opposite. Attribute selectors are left alone. */
+@media (max-width: 639px) {
+  /* iOS Safari zooms the whole page into any input under 16px and doesn't zoom back out. */
+  input, select, textarea {
+    font-size: 16px !important;
+  }
+  [class~="field"] { height: 2.75rem; }
+  /* 44px is the comfortable minimum for a thumb. */
+  [class~="btn"], [class~="btn-primary"], [class~="btn-ghost"], [class~="btn-danger"] { min-height: 2.75rem; }
+  [class~="btn-lg"] { min-height: 3.25rem; }
+
+  /* Small text links ("Tahrirlash", "O'chirish", "Bekor") are ~16px tall — too small for a
+     thumb. Grow the tap area without moving the layout: padding out, negative margin back. */
+  main :is(button, a)[class~="text-xs"]:not([class*="btn"]):not([class~="chip"]),
+  .fixed :is(button, a)[class~="text-xs"]:not([class*="btn"]):not([class~="chip"]) {
+    padding: 10px 4px;
+    margin: -10px -4px;
+  }
+
+  /* Tables scroll sideways inside their card instead of pushing the page wider. */
+  .overflow-x-auto { -webkit-overflow-scrolling: touch; }
+}
+
+/* No grey flash on tap, and no 300ms double-tap-zoom delay on buttons. */
+button, a { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }

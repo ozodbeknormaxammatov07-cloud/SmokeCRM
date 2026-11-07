@@ -1,6 +1,6 @@
 import { useEffect, useRef, type ReactNode } from 'react'
 import { useStore } from '../store'
-import { moneyShort, num, pct } from '../lib/format'
+import { money, num, pct } from '../lib/format'
 import type { StockLevel } from '../lib/analytics'
 
 export function Page({ title, subtitle, actions, children }: {
@@ -38,7 +38,7 @@ export function Kpi({ label, value, sub, tone = 'default' }: {
   return (
     <div className="card p-4">
       <div className="text-xs font-semibold text-ink-500">{label}</div>
-      <div className={`mt-1.5 text-2xl font-bold tracking-tight num ${toneCls}`}>{value}</div>
+      <div className={`mt-1.5 text-lg sm:text-xl xl:text-2xl font-bold tracking-tight num leading-tight ${toneCls}`}>{value}</div>
       {sub && <div className="mt-0.5 text-xs text-ink-400 num">{sub}</div>}
     </div>
   )
@@ -103,7 +103,7 @@ export function Modal({ open, onClose, title, children, wide }: {
       onMouseDown={(e) => { if (e.target === ref.current) onClose() }}
       ref={ref}
     >
-      <div className={`bg-white w-full ${wide ? 'sm:max-w-4xl' : 'sm:max-w-lg'} rounded-t-2xl sm:rounded-xl shadow-xl max-h-[92vh] flex flex-col`}>
+      <div className={`bg-white w-full ${wide ? 'sm:max-w-4xl' : 'sm:max-w-lg'} rounded-t-2xl sm:rounded-xl shadow-xl max-h-[92vh] flex flex-col pb-[env(safe-area-inset-bottom)] sm:pb-0`}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-ink-200">
           <h2 className="font-semibold">{title}</h2>
           <button onClick={onClose} className="text-ink-400 hover:text-ink-900 text-xl leading-none px-1" aria-label="Yopish">
@@ -145,5 +145,5 @@ export function MarginChip({ value }: { value: number }) {
 
 export function MoneyCell({ value, tone }: { value: number; tone?: 'good' | 'bad' }) {
   const cls = tone === 'good' ? 'text-emerald-600' : tone === 'bad' ? 'text-red-600' : ''
-  return <span className={`num font-medium ${cls}`}>{moneyShort(value)}</span>
+  return <span className={`num font-medium ${cls}`}>{money(value)}</span>
 }

@@ -1,12 +1,14 @@
 import { useMemo, useRef, useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useStore } from '../store'
-import { commitCart, StockError, voidTransaction } from '../lib/db'
+import { commitCart, StockError, voidTransaction, updateProduct } from '../lib/db'
+import { findByBarcode, looksLikeBarcode, cleanCode, useGlobalScanner, beep } from '../lib/scanner'
 import { createDelivery, voidDelivery } from '../lib/procurement'
 import { outstandingLines } from '../lib/payables'
 import { money, num, parseNum, isoDay, startOfDay } from '../lib/format'
 import { stockLevel } from '../lib/analytics'
-import { Page, StockBadge, Empty } from './ui'
+import { Page, StockBadge, Empty, Modal } from './ui'
+import QtyPicker from './QtyPicker'
 import type { CartLine, Product, TxType, SalePaymentMethod, Transaction, Delivery } from '../lib/types'
 
 interface Props {
@@ -34,6 +36,14 @@ export default function Counter({ type }: Props) {
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
+  const cartRef = useRef<HTMLDivElement>(null)
+  // Keep the search box focused for a USB scanner on a computer — but never on a touch screen,
+  // where focusing it throws the keyboard over the screen after every tap. A scanner paired with
+  // a phone still works there: useGlobalScanner catches it when no box has focus.
+  const focusSearch = () => {
+    if (window.matchMedia?.('(pointer: fine)').matches) searchRef.current?.focus()
+  }
+  const [cartVisible, setCartVisible] = useState(false)
 
   const [firmId, setFirmId] = useState('')
   const [docNumber, setDocNumber] = useState('')
@@ -50,9 +60,20 @@ export default function Counter({ type }: Props) {
   const [qtyDraft, setQtyDraft] = useState<Record<string, string>>({})
 
   useEffect(() => {
-    // Barcode scanners type into whatever is focused, so keep the search box hot.
-    searchRef.current?.focus()
-  }, [])
+    const el = cartRef.current
+    if (!el || typeof IntersectionObserver === 'undefined') return
+    const io = new IntersectionObserver(([e]) => setCartVisible(e.isIntersecting), { threshold: 0.15 })
+    io.observe(el)
+    return () => io.disconnect()
+  }, [products.length > 0])
+
+  useEffect(() => {
+    // Barcode scanners type into whatever is focused, so keep the search box hot. Keyed on
+    // products arriving: they load from the cloud AFTER mount, and until then the box doesn't
+    // exist (the page shows a placeholder), so focusing on mount alone focused nothing.
+    focusSearch()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [products.length > 0])
 
   // Arriving from an order ("Qabul qilish"): prefill the basket with what is STILL OUTSTANDING,
   // never the full order — a second delivery against a partly-received order must not re-receive
@@ -99,29 +120,109 @@ export default function Counter({ type }: Props) {
     return m
   }, [lines])
 
-  const add = (p: Product) => {
+  const add = (p: Product, n = 1): boolean => {
     const already = inCart.get(p.id) ?? 0
-    if (isSale && already + 1 > p.current_stock) {
+    if (isSale && already + n > p.current_stock) {
       toast(`"${p.name}" — omborda faqat ${p.current_stock} dona bor`, 'err')
-      return
+      return false
     }
     setLines((prev) => {
       const i = prev.findIndex((l) => l.product.id === p.id)
       if (i >= 0) {
         const next = [...prev]
-        next[i] = { ...next[i], quantity: next[i].quantity + 1 }
+        next[i] = { ...next[i], quantity: next[i].quantity + n }
         return next
       }
       return [
         ...prev,
-        { product: p, quantity: 1, unit_price: isSale ? p.selling_price : p.cost_price },
+        { product: p, quantity: n, unit_price: isSale ? p.selling_price : p.cost_price },
       ]
     })
     setQ('')
-    searchRef.current?.focus()
+    focusSearch()
+    return true
   }
 
-  const setQty = (id: string, qty: number) => {
+  // ── Barcode scanner ────────────────────────────────────────────────────────────
+  // A code that no product owns yet. The shop wrote everything by hand until now, so most
+  // products start without a barcode: the first scan asks which product it is and remembers.
+  const [unknownCode, setUnknownCode] = useState('')
+  const [linkQ, setLinkQ] = useState('')
+  const [linking, setLinking] = useState(false)
+
+  // The last scan and what happened to it, shown under the search box. A scan the page never
+  // received leaves this unchanged — so "nothing happened" is visible, not guessed at.
+  const [lastScan, setLastScan] = useState<{ code: string; msg: string; ok: boolean } | null>(null)
+
+  // A scanned product waiting for its quantity (the "how many?" popup).
+  const [pick, setPick] = useState<Product | null>(null)
+
+  const onScan = (raw: string) => {
+    const code = cleanCode(raw)
+    setQ('')
+    const p = findByBarcode(products, code)
+    if (p) {
+      const left = p.current_stock - (inCart.get(p.id) ?? 0)
+      if (isSale && left <= 0) {
+        beep(false)
+        toast(`"${p.name}" — omborda qolmagan`, 'err')
+        setLastScan({ code, ok: false, msg: `${p.name} — omborda qolmagan` })
+        return
+      }
+      beep(true)
+      setLastScan({ code, ok: true, msg: `${p.name} — sonini tanlang` })
+      setPick(p)
+      return
+    }
+    beep(false)
+    setLastScan({ code, ok: false, msg: 'topilmadi — mahsulotga biriktiring' })
+    setLinkQ('')
+    setUnknownCode(code)
+  }
+
+  const onScanRef = useRef(onScan)
+  onScanRef.current = onScan
+
+  const confirmPick = (n: number) => {
+    if (!pick) return
+    if (add(pick, n)) {
+      setLastScan({ code: pick.barcode ?? '', ok: true, msg: `${pick.name} — ${n} dona savatga qo'shildi` })
+      setPick(null)
+    }
+  }
+
+  useGlobalScanner(onScan, !unknownCode && !pick, setQ)
+
+  const linkResults = useMemo(() => {
+    const needle = linkQ.trim().toLowerCase()
+    return products
+      .filter((p) => p.active)
+      .filter((p) => !needle || p.name.toLowerCase().includes(needle) || p.brand.toLowerCase().includes(needle))
+      .slice(0, 30)
+  }, [products, linkQ])
+
+  const linkTo = async (p: Product) => {
+    if (linking) return
+    if (p.barcode && !confirm(`"${p.name}" da allaqachon ${p.barcode} shtrix-kodi bor. Yangisiga almashtirilsinmi?`)) return
+    setLinking(true)
+    try {
+      await updateProduct(p.id, { barcode: unknownCode })
+      toast(`${unknownCode} → "${p.name}" ga biriktirildi`)
+      setUnknownCode('')
+      setPick({ ...p, barcode: unknownCode })
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Xatolik', 'err')
+    } finally {
+      setLinking(false)
+    }
+  }
+
+  const closeLink = () => {
+    setUnknownCode('')
+    setTimeout(() => focusSearch(), 0)
+  }
+
+  const setQty =(id: string, qty: number) => {
     setLines((prev) =>
       prev.flatMap((l) => {
         if (l.product.id !== id) return [l]
@@ -199,7 +300,7 @@ export default function Counter({ type }: Props) {
         setNote('')
         setDocNumber('')
         setQ('')
-        searchRef.current?.focus()
+        focusSearch()
         return
       }
 
@@ -214,7 +315,7 @@ export default function Counter({ type }: Props) {
       clearCart()
       setNote('')
       setQ('')
-      searchRef.current?.focus()
+      focusSearch()
     } catch (e) {
       const msg =
         e instanceof StockError
@@ -287,7 +388,7 @@ export default function Counter({ type }: Props) {
     setDeliveredDay(firm?.deliveredDay ?? isoDay(Date.now()))
     setPayType('owe')
     setNote('')
-    searchRef.current?.focus()
+    focusSearch()
     return true
   }
 
@@ -414,16 +515,25 @@ export default function Counter({ type }: Props) {
               value={q}
               onChange={(e) => setQ(e.target.value)}
               onKeyDown={(e) => {
-                // A scanner ends its burst with Enter — take the single match.
-                if (e.key === 'Enter' && results.length) add(results[0])
+                if (e.key !== 'Enter') return
+                // A scanner ends its burst with Enter. A barcode must match EXACTLY —
+                // never "first product whose code contains these digits".
+                if (looksLikeBarcode(q)) return onScan(q)
+                // Typed a name: take the top match, as before.
+                if (results.length) add(results[0])
               }}
               inputMode="search"
               autoComplete="off"
             />
+            {lastScan && (
+              <div className={`text-xs font-medium truncate ${lastScan.ok ? 'text-emerald-700' : 'text-red-600'}`}>
+                📷 <span className="font-mono">{lastScan.code}</span> · {lastScan.msg}
+              </div>
+            )}
             <div className="flex gap-1.5 overflow-x-auto pb-0.5">
               <button
                 onClick={() => setBrand('')}
-                className={`chip shrink-0 h-7 px-2.5 ${!brand ? 'bg-ink-950 text-white' : 'bg-ink-100 text-ink-600'}`}
+                className={`chip shrink-0 h-9 sm:h-7 px-3 sm:px-2.5 ${!brand ? 'bg-ink-950 text-white' : 'bg-ink-100 text-ink-600'}`}
               >
                 Hammasi
               </button>
@@ -431,7 +541,7 @@ export default function Counter({ type }: Props) {
                 <button
                   key={b}
                   onClick={() => setBrand(b === brand ? '' : b)}
-                  className={`chip shrink-0 h-7 px-2.5 ${brand === b ? 'bg-ink-950 text-white' : 'bg-ink-100 text-ink-600'}`}
+                  className={`chip shrink-0 h-9 sm:h-7 px-3 sm:px-2.5 ${brand === b ? 'bg-ink-950 text-white' : 'bg-ink-100 text-ink-600'}`}
                 >
                   {b}
                 </button>
@@ -439,7 +549,7 @@ export default function Counter({ type }: Props) {
             </div>
           </div>
 
-          <div className="max-h-[26rem] overflow-y-auto divide-y divide-ink-100">
+          <div className="max-h-[55vh] sm:max-h-[26rem] overflow-y-auto overscroll-contain divide-y divide-ink-100">
             {results.map((p) => {
               // What's left on the shelf once the cart is accounted for. Clamped at 0:
               // the cart can ask for more than exists (we block that on confirm), but
@@ -454,7 +564,7 @@ export default function Counter({ type }: Props) {
                   className="w-full flex items-center gap-3 px-3 py-3 text-left hover:bg-ink-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                 >
                   <div className="min-w-0 flex-1">
-                    <div className="text-sm font-semibold truncate">{p.name}</div>
+                    <div className="text-sm font-semibold line-clamp-2 sm:truncate">{p.name}</div>
                     <div className="text-xs text-ink-400">{p.brand}</div>
                   </div>
                   <div className="text-right shrink-0">
@@ -475,7 +585,7 @@ export default function Counter({ type }: Props) {
         </div>
 
         {/* Cart */}
-        <div className="card p-4 lg:sticky lg:top-5">
+        <div ref={cartRef} className="card p-4 lg:sticky lg:top-5 scroll-mt-16">
           <div className="flex items-baseline justify-between mb-3">
             <h2 className="font-semibold">Savat</h2>
             {!!lines.length && (
@@ -497,7 +607,7 @@ export default function Counter({ type }: Props) {
                   <div key={l.product.id} className={`rounded-lg border p-2.5 ${over ? 'border-red-300 bg-red-50' : 'border-ink-200'}`}>
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
-                        <div className="text-sm font-semibold truncate">{l.product.name}</div>
+                        <div className="text-sm font-semibold line-clamp-2 sm:truncate">{l.product.name}</div>
                         <div className="text-xs text-ink-400">{l.product.brand}</div>
                       </div>
                       <button
@@ -701,6 +811,22 @@ export default function Counter({ type }: Props) {
         </div>
       </div>
 
+      {/* Phone: the basket sits below a long product list, so keep a bar above the bottom nav
+          that shows what's in it and jumps to it. Hidden while the basket itself is on screen. */}
+      {!!lines.length && !cartVisible && (
+        <button
+          onClick={() => cartRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+          className={`sm:hidden fixed inset-x-3 z-30 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] h-14 rounded-xl shadow-lg px-4 flex items-center justify-between text-white ${isSale ? 'bg-ink-950' : 'bg-emerald-600'}`}
+        >
+          <span className="text-sm font-semibold">🛒 {num(units)} dona</span>
+          <span className="flex items-center gap-2">
+            <span className="font-bold num">{money(total)}</span>
+            <span className="text-sm">→</span>
+          </span>
+        </button>
+      )}
+      {!!lines.length && <div className="sm:hidden h-16" />}
+
       {!isSale && (!!todayDeliveries.length || !!todayPlainLines.length) && (
         <div className="card p-4 mt-5">
           <h2 className="font-semibold mb-3">Bugungi kirimlar</h2>
@@ -713,7 +839,7 @@ export default function Counter({ type }: Props) {
                   className="rounded-lg border border-ink-200 p-2.5 flex items-center justify-between gap-2"
                 >
                   <div className="min-w-0">
-                    <div className="text-sm font-semibold truncate">
+                    <div className="text-sm font-semibold line-clamp-2 sm:truncate">
                       {firm?.name ?? 'Firma'}{d.doc_number ? ` · №${d.doc_number}` : ''}
                     </div>
                     <div className="text-xs text-ink-400">
@@ -745,7 +871,7 @@ export default function Counter({ type }: Props) {
                 className="rounded-lg border border-ink-200 p-2.5 flex items-center justify-between gap-2"
               >
                 <div className="min-w-0">
-                  <div className="text-sm font-semibold truncate">{t.product_name}</div>
+                  <div className="text-sm font-semibold line-clamp-2 sm:truncate">{t.product_name}</div>
                   <div className="text-xs text-ink-400">
                     {num(t.quantity)} dona · {money(t.total_amount)}
                   </div>
@@ -786,7 +912,7 @@ export default function Counter({ type }: Props) {
                 className="rounded-lg border border-ink-200 p-2.5 flex items-center justify-between gap-2"
               >
                 <div className="min-w-0">
-                  <div className="text-sm font-semibold truncate">{t.product_name}</div>
+                  <div className="text-sm font-semibold line-clamp-2 sm:truncate">{t.product_name}</div>
                   <div className="text-xs text-ink-400">
                     {num(t.quantity)} dona · {money(t.total_amount)}
                     {t.payment_method ? ` · ${{ cash: 'Naqd', card: 'Plastik', click: 'Click' }[t.payment_method]}` : ''}
@@ -817,6 +943,63 @@ export default function Counter({ type }: Props) {
           </p>
         </div>
       )}
+      {pick && (
+        <QtyPicker
+          key={pick.id}
+          product={pick}
+          unitPrice={isSale ? pick.selling_price : pick.cost_price}
+          isSale={isSale}
+          left={isSale ? pick.current_stock - (inCart.get(pick.id) ?? 0) : Infinity}
+          isKnownCode={(c) => !!findByBarcode(products, c)}
+          onConfirm={confirmPick}
+          onCancel={() => { setPick(null); setTimeout(focusSearch, 0) }}
+          onNextScan={(code, n) => {
+            const ok = add(pick, n)
+            setPick(null)
+            if (ok) setTimeout(() => onScanRef.current(code), 0)
+          }}
+        />
+      )}
+
+      <Modal open={!!unknownCode} onClose={closeLink} title="Yangi shtrix-kod">
+        <div className="space-y-3">
+          <p className="text-sm text-ink-600">
+            <span className="font-mono font-semibold text-ink-950">{unknownCode}</span> hech qaysi
+            mahsulotga biriktirilmagan. Bu qaysi mahsulot? Bir marta tanlang — keyingi safar
+            skaner o'zi taniydi.
+          </p>
+          <input
+            autoFocus
+            className="field"
+            placeholder="Mahsulot nomi yoki brend…"
+            value={linkQ}
+            onChange={(e) => setLinkQ(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && linkResults.length === 1) void linkTo(linkResults[0]) }}
+          />
+          <div className="max-h-80 overflow-y-auto divide-y divide-ink-100 rounded-lg border border-ink-200">
+            {linkResults.map((p) => (
+              <button
+                key={p.id}
+                disabled={linking}
+                onClick={() => void linkTo(p)}
+                className="w-full flex items-center justify-between gap-3 px-3 py-2.5 text-left hover:bg-ink-50 disabled:opacity-40"
+              >
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold line-clamp-2 sm:truncate">{p.name}</div>
+                  <div className="text-xs text-ink-400">{p.brand}{p.barcode ? ` · ${p.barcode}` : ''}</div>
+                </div>
+                <span className="text-xs font-semibold text-ink-500 shrink-0">Biriktirish</span>
+              </button>
+            ))}
+            {!linkResults.length && (
+              <div className="p-6 text-center text-sm text-ink-400">Topilmadi</div>
+            )}
+          </div>
+          <p className="text-xs text-ink-400">
+            Ro'yxatda yo'qmi? Avval Mahsulotlar bo'limida qo'shing (shtrix-kod maydoniga skaner qiling).
+          </p>
+        </div>
+      </Modal>
     </Page>
   )
 }

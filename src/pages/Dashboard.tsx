@@ -7,7 +7,7 @@ import {
   supplierBalance, unpaidDeliveries, forSupplier, orderStatus,
 } from '../lib/payables'
 import { drawerBalance } from '../lib/kassa'
-import { money, moneyShort, num, pct, startOfDay, endOfDay, isoDay, daysAgo, dateTimeLabel } from '../lib/format'
+import { money, num, pct, startOfDay, endOfDay, isoDay, daysAgo, dateTimeLabel } from '../lib/format'
 import { Page, Kpi, StockBadge } from '../components/ui'
 import { BestSellersChart } from '../components/charts'
 import type { Transaction } from '../lib/types'
@@ -76,7 +76,7 @@ export default function Dashboard() {
             <button
               key={r.key}
               onClick={() => setRangeKey(r.key)}
-              className={`px-3 h-8 rounded-md text-xs font-semibold transition-colors ${
+              className={`px-3 h-10 sm:h-8 rounded-md text-xs font-semibold transition-colors ${
                 rangeKey === r.key ? 'bg-white text-ink-950 shadow-sm' : 'text-ink-500'
               }`}
             >
@@ -87,14 +87,14 @@ export default function Dashboard() {
       }
     >
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-        <Kpi label="Tushum" value={moneyShort(t.revenue)} sub={`${num(t.saleCount)} ta sotuv`} />
+        <Kpi label="Tushum" value={money(t.revenue)} sub={`${num(t.saleCount)} ta sotuv`} />
         <Kpi
           label="Foyda"
-          value={moneyShort(t.profit)}
+          value={money(t.profit)}
           sub={`marja ${pct(t.margin)}`}
           tone={t.profit > 0 ? 'good' : t.profit < 0 ? 'bad' : 'default'}
         />
-        <Kpi label="Sotilgan" value={`${num(t.unitsSold)} dona`} sub={`kirim: ${moneyShort(t.restockCost)}`} />
+        <Kpi label="Sotilgan" value={`${num(t.unitsSold)} dona`} sub={`kirim: ${money(t.restockCost)}`} />
         <Kpi
           label="Kam qolgan"
           value={`${num(reorder.length)} ta`}
@@ -115,7 +115,7 @@ export default function Dashboard() {
         <Link to="/kassa" className="contents">
           <Kpi
             label="Kassada naqd"
-            value={moneyShort(drawerBalance(recent, payments, movements))}
+            value={money(drawerBalance(recent, payments, movements))}
             sub="hozirgi qoldiq"
           />
         </Link>
@@ -124,7 +124,7 @@ export default function Dashboard() {
             <Link to="/firmalar" className="contents">
             <Kpi
               label="Firmalarga qarz"
-              value={moneyShort(payables.totalDebt)}
+              value={money(payables.totalDebt)}
               sub={
                 payables.overdueCount
                   ? `${num(payables.overdueCount)} ta kechikkan to'lov`

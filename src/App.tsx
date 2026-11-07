@@ -1,4 +1,5 @@
-import { NavLink, Route, Routes, Navigate } from 'react-router-dom'
+import { NavLink, Route, Routes, Navigate, useLocation } from 'react-router-dom'
+import { useEffect, useState } from 'react'
 import type { JSX } from 'react'
 import { useStore } from './store'
 import { Toasts } from './components/ui'
@@ -143,29 +144,88 @@ export default function App() {
         </Routes>
       </main>
 
-      {/* Bottom nav — mobile */}
-      <nav
-        className="sm:hidden fixed bottom-0 inset-x-0 z-40 bg-white border-t border-ink-200 grid pb-[env(safe-area-inset-bottom)]"
-        style={{ gridTemplateColumns: `repeat(${nav.length}, minmax(0, 1fr))` }}
-      >
-        {nav.map((n) => (
-          <NavLink
-            key={n.to}
-            to={n.to}
-            end={n.end}
-            className={({ isActive }) =>
-              `flex flex-col items-center justify-center gap-0.5 h-16 text-[10px] font-semibold transition-colors ${
-                isActive ? 'text-ink-950' : 'text-ink-400'
-              }`
-            }
-          >
-            <span className="text-lg">{n.icon}</span>
-            {n.label}
-          </NavLink>
-        ))}
-      </nav>
+      <MobileNav nav={nav} onLogout={logout} who={actor.name} />
 
       <Toasts />
     </div>
+  )
+}
+
+type NavItem = (typeof NAV)[number]
+
+/**
+ * Phone bottom bar. Eight tabs don't fit in 375px (labels got cut off), so past five it shows
+ * the first four plus "Yana", which opens the rest as a sheet.
+ */
+function MobileNav({ nav, onLogout, who }: { nav: NavItem[]; onLogout: () => void; who: string }) {
+  const [open, setOpen] = useState(false)
+  const { pathname } = useLocation()
+  useEffect(() => setOpen(false), [pathname])
+  // A new page starts at the top — otherwise it opens wherever the last page was scrolled to.
+  useEffect(() => { window.scrollTo(0, 0) }, [pathname])
+
+  const main = nav.length <= 5 ? nav : nav.slice(0, 4)
+  const more = nav.length <= 5 ? [] : nav.slice(4)
+  const moreActive = more.some((n) => pathname === n.to || pathname.startsWith(n.to + '/'))
+    || (pathname === '/buyurtmalar' && more.some((n) => n.to === '/firmalar'))
+
+  const tab = (active: boolean) =>
+    `flex flex-col items-center justify-center gap-0.5 h-16 text-[11px] font-semibold transition-colors ${
+      active ? 'text-ink-950' : 'text-ink-400'
+    }`
+
+  return (
+    <>
+      {open && (
+        <div className="sm:hidden fixed inset-0 z-[35] bg-ink-950/40" onClick={() => setOpen(false)}>
+          <div
+            className="absolute inset-x-0 bottom-0 bg-white rounded-t-2xl pt-2 pb-[calc(4.5rem+env(safe-area-inset-bottom))]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="w-10 h-1 rounded-full bg-ink-200 mx-auto mb-2" />
+            <div className="grid grid-cols-2 gap-2 px-4">
+              {more.map((n) => (
+                <NavLink
+                  key={n.to}
+                  to={n.to}
+                  className={({ isActive }) =>
+                    `flex items-center gap-3 h-14 px-4 rounded-xl text-sm font-semibold ${
+                      isActive ? 'bg-ink-950 text-white' : 'bg-ink-50 text-ink-800'
+                    }`
+                  }
+                >
+                  <span className="text-xl">{n.icon}</span>
+                  {n.label}
+                </NavLink>
+              ))}
+            </div>
+            <button
+              onClick={onLogout}
+              className="mx-4 mt-3 w-[calc(100%-2rem)] h-12 rounded-xl border border-ink-200 text-sm font-semibold text-ink-600"
+            >
+              {who} · chiqish
+            </button>
+          </div>
+        </div>
+      )}
+
+      <nav
+        className="sm:hidden fixed bottom-0 inset-x-0 z-40 bg-white border-t border-ink-200 grid pb-[env(safe-area-inset-bottom)]"
+        style={{ gridTemplateColumns: `repeat(${main.length + (more.length ? 1 : 0)}, minmax(0, 1fr))` }}
+      >
+        {main.map((n) => (
+          <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => tab(isActive && !open)}>
+            <span className="text-xl">{n.icon}</span>
+            <span className="truncate max-w-full px-1">{n.label}</span>
+          </NavLink>
+        ))}
+        {!!more.length && (
+          <button onClick={() => setOpen((o) => !o)} className={tab(open || moreActive)}>
+            <span className="text-xl">☰</span>
+            Yana
+          </button>
+        )}
+      </nav>
+    </>
   )
 }

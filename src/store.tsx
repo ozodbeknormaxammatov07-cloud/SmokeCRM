@@ -24,7 +24,7 @@ interface Actor {
   role: Role
 }
 
-interface Store {
+export interface Store {
   ready: boolean
   error: string | null
   products: Product[]
@@ -56,7 +56,8 @@ interface Store {
   toasts: { id: number; msg: string; kind: 'ok' | 'err' }[]
 }
 
-const Ctx = createContext<Store | null>(null)
+/** Exported for the dev-only mobile preview (dev/preview.html); the app itself uses StoreProvider. */
+export const Ctx = createContext<Store | null>(null)
 
 const SESSION_KEY = 'ts.session'
 

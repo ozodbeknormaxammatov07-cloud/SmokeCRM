@@ -84,7 +84,7 @@ export default function Orders() {
                     <span className="font-semibold num">{order.number}</span>
                     <span className={`chip ${TONE[status]}`}>{ORDER_STATUS_LABEL[status]}</span>
                   </div>
-                  <div className="text-sm text-ink-500 mt-0.5 truncate">{firm?.name ?? '—'}</div>
+                  <div className="text-sm text-ink-500 mt-0.5 line-clamp-2 sm:truncate">{firm?.name ?? '—'}</div>
                   {order.expected_at && (
                     <div className="text-xs text-ink-400">
                       Kutilmoqda: {dateLabel(order.expected_at)}

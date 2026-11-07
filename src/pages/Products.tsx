@@ -8,6 +8,7 @@ import { Page, StockBadge, MarginChip, Modal, Empty } from '../components/ui'
 import ImportWizard from '../components/ImportWizard'
 import { can } from '../lib/auth'
 import type { NewProduct, Product } from '../lib/types'
+import { barcodeOwner, cleanCode } from '../lib/scanner'
 
 const BLANK: NewProduct = {
   name: '', brand: 'UzBat', cost_price: 0, selling_price: 0,
@@ -59,20 +60,20 @@ export default function Products() {
     >
       <div className="card p-3 mb-4 flex flex-wrap gap-2 items-center">
         <input
-          className="field flex-1 min-w-[12rem]"
+          className="field basis-full sm:basis-0 flex-1 sm:min-w-[12rem]"
           placeholder="Nomi yoki shtrix-kod bo'yicha qidirish…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
-        <select className="field w-40" value={brand} onChange={(e) => setBrand(e.target.value)}>
+        <select className="field flex-1 sm:flex-none sm:w-44" value={brand} onChange={(e) => setBrand(e.target.value)}>
           <option value="">Barcha brendlar</option>
           {brands.map((b) => <option key={b} value={b}>{b}</option>)}
         </select>
         <button
           onClick={() => setOnlyLow((v) => !v)}
-          className={`btn ${onlyLow ? 'btn-primary' : 'btn-ghost'}`}
+          className={`btn flex-1 sm:flex-none ${onlyLow ? 'btn-primary' : 'btn-ghost'}`}
         >
-          Faqat kam qolganlar
+          Kam qolganlar
         </button>
       </div>
 
@@ -83,7 +84,51 @@ export default function Products() {
           action={<button className="btn-primary" onClick={() => setImportOpen(true)}>Excel'dan import qilish</button>}
         />
       ) : (
-        <div className="card overflow-hidden">
+        <>
+        {/* Phone: one card per product instead of a nine-column table. */}
+        <div className="sm:hidden card divide-y divide-ink-100 overflow-hidden">
+          {rows.map((p) => {
+            const level = stockLevel(p)
+            return (
+              <div key={p.id} className={`flex items-center gap-3 px-3 py-3 ${!p.active ? 'opacity-45' : ''}`}>
+                <button
+                  className="min-w-0 flex-1 text-left"
+                  onClick={() => manage && setEditing(p)}
+                  disabled={!manage}
+                >
+                  <div className="text-sm font-semibold line-clamp-2">
+                    {p.name}
+                    {!p.active && <span className="ml-2 chip bg-ink-100 text-ink-500">nofaol</span>}
+                  </div>
+                  <div className="text-xs text-ink-400 mt-0.5">
+                    {p.brand}
+                    {manage && <> · kelish {money(p.cost_price)}</>}
+                  </div>
+                  <div className="text-sm font-semibold num mt-0.5">
+                    {money(p.selling_price)}
+                    {manage && <span className="ml-2 align-middle"><MarginChip value={productMargin(p)} /></span>}
+                  </div>
+                </button>
+                {manage ? (
+                  <button
+                    onClick={() => setAdjusting(p)}
+                    className="shrink-0 min-w-[3.5rem] h-11 rounded-lg border border-ink-200 grid place-items-center"
+                    title="Qoldiqni tuzatish"
+                  >
+                    <StockBadge level={level} stock={p.current_stock} />
+                  </button>
+                ) : (
+                  <StockBadge level={level} stock={p.current_stock} />
+                )}
+              </div>
+            )
+          })}
+          {!rows.length && (
+            <p className="p-8 text-center text-sm text-ink-400">Filtrga mos mahsulot topilmadi</p>
+          )}
+        </div>
+
+        <div className="hidden sm:block card overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead className="bg-ink-50 border-b border-ink-200">
@@ -150,6 +195,7 @@ export default function Products() {
             <p className="p-8 text-center text-sm text-ink-400">Filtrga mos mahsulot topilmadi</p>
           )}
         </div>
+        </>
       )}
 
       {editing && (
@@ -193,6 +239,7 @@ function ProductForm({ initial, brands, actor, onClose, onSaved, onError }: {
   )
   const [newBrand, setNewBrand] = useState('')
   const [busy, setBusy] = useState(false)
+  const { products } = useStore()
 
   const set = <K extends keyof NewProduct>(k: K, v: NewProduct[K]) => setF((p) => ({ ...p, [k]: v }))
 
@@ -203,9 +250,11 @@ function ProductForm({ initial, brands, actor, onClose, onSaved, onError }: {
   const save = async () => {
     if (!f.name.trim()) return onError('Mahsulot nomini kiriting')
     if (f.selling_price <= 0) return onError('Sotish narxini kiriting')
+    const owner = barcodeOwner(products, f.barcode ?? '', initial?.id)
+    if (owner) return onError(`Bu shtrix-kod "${owner.name}" ga biriktirilgan`)
     setBusy(true)
     try {
-      const payload = { ...f, name: f.name.trim(), brand, barcode: f.barcode?.trim() || '' }
+      const payload = { ...f, name: f.name.trim(), brand, barcode: cleanCode(f.barcode ?? '') }
       if (initial) {
         // current_stock stays out of the patch on purpose — stock moves only via the ledger.
         const { current_stock: _s, ...rest } = payload
@@ -314,7 +363,14 @@ function ProductForm({ initial, brands, actor, onClose, onSaved, onError }: {
 
         <div>
           <label className="label">Shtrix-kod (ixtiyoriy)</label>
-          <input className="field" value={f.barcode ?? ''} onChange={(e) => set('barcode', e.target.value)} />
+          <input
+            className="field font-mono"
+            placeholder="Skanerni shu yerga bosing"
+            value={f.barcode ?? ''}
+            onChange={(e) => set('barcode', e.target.value)}
+            // The scanner ends with Enter; swallow it so it doesn't trigger anything else.
+            onKeyDown={(e) => { if (e.key === 'Enter') e.preventDefault() }}
+          />
         </div>
 
         <label className="flex items-center gap-2 text-sm">

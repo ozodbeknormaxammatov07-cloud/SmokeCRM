@@ -2,7 +2,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   LineChart, Line, Legend,
 } from 'recharts'
-import { moneyShort, num } from '../lib/format'
+import { money, num } from '../lib/format'
 
 /** Validated categorical slots (light surface #fff): CVD ΔE 73.6. */
 export const SERIES = {
@@ -90,7 +90,7 @@ export function TrendChart({ data }: { data: { label: string; revenue: number; p
       <LineChart data={data} margin={{ top: 8, right: 12, bottom: 4, left: 4 }}>
         <CartesianGrid vertical={false} stroke={INK.grid} />
         <XAxis dataKey="label" {...AXIS} />
-        <YAxis {...AXIS} width={64} tickFormatter={(v: number) => moneyShort(v).replace(" so'm", '')} />
+        <YAxis {...AXIS} width={92} tickFormatter={(v: number) => num(v)} />
         <Tooltip
           cursor={{ stroke: INK.axis, strokeWidth: 1 }}
           content={({ active, label, payload }: TipProps) =>
@@ -99,7 +99,7 @@ export function TrendChart({ data }: { data: { label: string; revenue: number; p
                 label={String(label)}
                 rows={payload.map((p) => ({
                   name: p.dataKey === 'revenue' ? 'Tushum' : 'Foyda',
-                  value: moneyShort(p.value ?? 0),
+                  value: money(p.value ?? 0),
                   color: p.color ?? INK.muted,
                 }))}
               />
@@ -139,14 +139,14 @@ export function BrandChart({ data }: { data: { name: string; revenue: number }[]
       <BarChart data={data} margin={{ top: 8, right: 8, bottom: 4, left: 4 }}>
         <CartesianGrid vertical={false} stroke={INK.grid} />
         <XAxis dataKey="name" {...AXIS} />
-        <YAxis {...AXIS} width={64} tickFormatter={(v: number) => moneyShort(v).replace(" so'm", '')} />
+        <YAxis {...AXIS} width={92} tickFormatter={(v: number) => num(v)} />
         <Tooltip
           cursor={{ fill: 'rgba(11,11,11,0.04)' }}
           content={({ active, label, payload }: TipProps) =>
             active && payload?.length ? (
               <TipBox
                 label={String(label)}
-                rows={[{ name: 'Tushum', value: moneyShort(payload[0].value ?? 0), color: SERIES.revenue }]}
+                rows={[{ name: 'Tushum', value: money(payload[0].value ?? 0), color: SERIES.revenue }]}
               />
             ) : null
           }
